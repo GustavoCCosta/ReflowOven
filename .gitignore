@@ -1,0 +1,30 @@
+# Build output
+build/
+build*/
+twister-out/
+twister-out.*/
+
+# Artefatos de firmware e do simulador de host
+*.uf2
+*.bin
+*.hex
+*.elf
+*.map
+host_sim
+host_sim.exe
+
+# Ambiente Python e workspace do west: nunca pertencem ao projeto
+.venv/
+venv/
+.west/
+__pycache__/
+*.pyc
+
+# Editores e sistema operacional
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,238 @@
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "Reflow oven firmware"
+
+menu "Reflow oven"
+
+comment "Control core"
+
+config REFLOW_CTRL_PERIOD_MS
+	int "Control loop period (ms)"
+	default 100
+	range 10 1000
+	help
+	  Cadence of the control thread. It drives the SSR window modulation
+	  and the profile state machine.
+
+config REFLOW_SAMPLE_PERIOD_MS
+	int "Thermocouple sampling period (ms)"
+	default 250
+	range 100 2000
+	help
+	  A MAX6675 conversion takes about 220 ms; do not go below that.
+
+config REFLOW_PUBLISH_PERIOD_MS
+	int "Telemetry publish period (ms)"
+	default 500
+	range 100 5000
+
+config REFLOW_ABS_MAX_TEMP_C
+	int "Absolute over-temperature cut-out (degC)"
+	default 270
+	range 60 400
+	help
+	  Firmware backstop, checked independently of the running profile.
+	  It does NOT replace a hardware thermal fuse.
+
+config REFLOW_CTRL_STACK_SIZE
+	int "Control thread stack size"
+	default 2048
+
+config REFLOW_CTRL_PRIORITY
+	int "Control thread priority"
+	default 5
+	help
+	  Lower is higher priority. Keep it above the UI and network threads.
+
+comment "Heater output"
+
+config REFLOW_HEATER_WINDOW_MS
+	int "Slow PWM window (ms)"
+	default 1000
+	range 100 10000
+
+config REFLOW_HEATER_MIN_PULSE_MS
+	int "Shortest pulse the SSR is allowed to receive (ms)"
+	default 50
+	range 0 1000
+	help
+	  Duties that would produce a shorter pulse are snapped to 0 % or 100 %.
+
+config REFLOW_HEATER_STALE_MS
+	int "Force the output off if no duty update within (ms)"
+	default 2000
+	range 200 10000
+	help
+	  Fail-safe: if the control loop stops updating the request, the
+	  element is switched off.
+
+comment "PID gains (milli-units: 40000 means 40.0)"
+
+config REFLOW_PID_KP_MILLI
+	int "Kp, permille of duty per degC of error"
+	default 60000
+
+config REFLOW_PID_KI_MILLI
+	int "Ki"
+	default 2000
+
+config REFLOW_PID_KD_MILLI
+	int "Kd"
+	default 250000
+
+config REFLOW_PID_I_CLAMP
+	int "Integral term clamp (permille)"
+	default 1000
+	help
+	  A heater needs most of its steady-state duty to come from the
+	  integral term, so this is deliberately as large as the output range.
+
+config REFLOW_PID_D_ALPHA_MILLI
+	int "Derivative low-pass coefficient (milli, 1000 = off)"
+	default 200
+	range 1 1000
+
+comment "Optional features"
+
+config REFLOW_UI_DISPLAY
+	bool "Local display UI (LVGL)"
+	select DISPLAY
+	select LVGL
+	help
+	  ST7789-class colour panel described by the 'zephyr,display' chosen
+	  node. Purely an observer of the telemetry channel.
+
+config REFLOW_UI_DISPLAY_STACK_SIZE
+	int "Display thread stack size"
+	default 4096
+	depends on REFLOW_UI_DISPLAY
+
+config REFLOW_UI_INPUT
+	bool "Rotary encoder and button"
+	select INPUT
+	help
+	  Uses gpio-qdec and gpio-keys nodes through the input subsystem.
+
+config REFLOW_SHELL
+	bool "Serial console commands"
+	select SHELL
+	default y
+	help
+	  'reflow status|start|stop|clear|profile' on the console. Very useful
+	  during bring-up; can be removed from a production build.
+
+config REFLOW_NET
+	bool "Wi-Fi and web UI"
+	select NETWORKING
+	select WIFI
+	select NET_IPV4
+	select NET_TCP
+	select NET_SOCKETS
+	select NET_MGMT
+	select NET_MGMT_EVENT
+	select NET_CONNECTION_MANAGER
+
+# Credentials stay outside the 'if' below so that setting them in prj.conf
+# never warns in a build without networking.
+config REFLOW_WIFI_SSID
+	string "Wi-Fi SSID"
+	default "changeme"
+
+config REFLOW_WIFI_PSK
+	string "Wi-Fi passphrase (empty for an open network)"
+	default ""
+
+if REFLOW_NET
+
+config REFLOW_NET_HTTP_PORT
+	int "HTTP port"
+	default 80
+
+config REFLOW_NET_MAX_CLIENTS
+	int "Simultaneous HTTP connections"
+	default 4
+	range 1 8
+
+config REFLOW_NET_PUSH_PERIOD_MS
+	int "Server-sent events push period (ms)"
+	default 1000
+	range 200 10000
+
+config REFLOW_NET_STACK_SIZE
+	int "HTTP server thread stack size"
+	default 4096
+
+endif # REFLOW_NET
+
+module = REFLOW
+module-str = reflow
+source "subsys/logging/Kconfig.template.log_config"
+
+endmenu
+
+source "Kconfig.zephyr"
+
+# Subsystem tuning that belongs to a feature, kept here instead of in
+# prj.conf so that switching the feature off really removes it from the image.
+# 'configdefault' only supplies a default: anything set explicitly in prj.conf
+# or on the command line still wins. Requires Zephyr 3.7 or newer.
+
+# --- display UI (LVGL) ---
+configdefault LV_Z_MEM_POOL_SIZE
+	default 24576 if REFLOW_UI_DISPLAY
+
+configdefault LV_Z_VDB_SIZE
+	default 16 if REFLOW_UI_DISPLAY
+
+configdefault LV_FONT_MONTSERRAT_28
+	default y if REFLOW_UI_DISPLAY
+
+configdefault LV_USE_LOG
+	default n if REFLOW_UI_DISPLAY
+
+# --- encoder / button ---
+configdefault INPUT_GPIO_QDEC
+	default y if REFLOW_UI_INPUT
+
+configdefault INPUT_GPIO_KEYS
+	default y if REFLOW_UI_INPUT
+
+# --- Wi-Fi and web UI ---
+configdefault NET_DHCPV4
+	default y if REFLOW_NET
+
+configdefault NET_SOCKETS_POLL_MAX
+	default 8 if REFLOW_NET
+
+configdefault NET_MAX_CONTEXTS
+	default 10 if REFLOW_NET
+
+configdefault NET_MAX_CONN
+	default 8 if REFLOW_NET
+
+configdefault NET_PKT_RX_COUNT
+	default 16 if REFLOW_NET
+
+configdefault NET_PKT_TX_COUNT
+	default 16 if REFLOW_NET
+
+configdefault NET_BUF_RX_COUNT
+	default 32 if REFLOW_NET
+
+configdefault NET_BUF_TX_COUNT
+	default 32 if REFLOW_NET
+
+configdefault HEAP_MEM_POOL_SIZE
+	default 32768 if REFLOW_NET
+
+# Espressif Wi-Fi driver and its L2. Both symbols only exist on Espressif
+# SoCs, so this block is a no-op on any other target.
+configdefault WIFI_ESP32
+	default y if REFLOW_NET
+
+configdefault NET_L2_ETHERNET
+	default y if REFLOW_NET
+
+# --- shell ---
+configdefault SHELL_STACK_SIZE
+	default 4096 if REFLOW_SHELL

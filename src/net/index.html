@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Reflow oven</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:0;padding:16px;background:#111;color:#eee}
+h1{font-size:18px;margin:0 0 12px}
+#temp{font-size:44px;font-weight:600;line-height:1}
+#sub{color:#aaa;margin:4px 0 12px}
+button,select{font:inherit;padding:8px 14px;margin:0 6px 6px 0;border:0;border-radius:6px;background:#2b6;color:#031;cursor:pointer}
+button.stop{background:#c53;color:#fff}
+button.warn{background:#666;color:#fff}
+canvas{width:100%;height:220px;background:#000;border-radius:6px;margin-top:12px}
+.bad{color:#f66;font-weight:600}
+table{border-collapse:collapse;margin-top:12px;width:100%;max-width:420px}
+td{padding:3px 8px 3px 0;color:#bbb}
+td.v{color:#eee;text-align:right}
+</style>
+</head>
+<body>
+<h1>Reflow oven</h1>
+<div id='temp'>--.- &deg;C</div>
+<div id='sub'>connecting...</div>
+<div>
+<select id='prof'></select>
+<button onclick='cmd("start")'>Start</button>
+<button class='stop' onclick='cmd("stop")'>Stop</button>
+<button class='warn' onclick='cmd("clear")'>Clear fault</button>
+</div>
+<canvas id='c' width='640' height='220'></canvas>
+<table>
+<tr><td>setpoint</td><td class='v' id='sp'>-</td></tr>
+<tr><td>duty</td><td class='v' id='duty'>-</td></tr>
+<tr><td>stage</td><td class='v' id='stage'>-</td></tr>
+<tr><td>elapsed</td><td class='v' id='el'>-</td></tr>
+</table>
+<script>
+var hist=[],MAXP=600,profs=[],lastProf=-1;
+function cmd(id){var q='/api/cmd?id='+id;if(id=='profile')q+='&arg='+document.getElementById('prof').value;fetch(q,{method:'POST'});}
+document.getElementById('prof').onchange=function(){cmd('profile');};
+function fmt(t){var s=Math.floor(t/1000),m=Math.floor(s/60);return m+':'+('0'+(s%60)).slice(-2);}
+function draw(){
+ var c=document.getElementById('c'),g=c.getContext('2d');
+ g.clearRect(0,0,c.width,c.height);
+ var max=260,h=c.height,w=c.width;
+ g.strokeStyle='#333';g.beginPath();
+ for(var t=0;t<=250;t+=50){var y=h-t/max*h;g.moveTo(0,y);g.lineTo(w,y);}
+ g.stroke();
+ if(hist.length<2)return;
+ var n=hist.length,dx=w/Math.max(n-1,1);
+ function line(key,col){g.strokeStyle=col;g.lineWidth=2;g.beginPath();
+  for(var i=0;i<n;i++){var y=h-Math.max(hist[i][key],0)/max*h;i?g.lineTo(i*dx,y):g.moveTo(i*dx,y);}g.stroke();}
+ line('sp','#57f');line('t','#2b6');
+}
+function update(d){
+ document.getElementById('temp').innerHTML=(d.temp_mc/1000).toFixed(1)+' &deg;C';
+ var s=d.state+(d.fault!='none'?' - FAULT: '+d.fault:'');
+ var sub=document.getElementById('sub');sub.textContent=s;
+ sub.className=d.fault!='none'?'bad':'';
+ document.getElementById('sp').textContent=d.setpoint_mc?(d.setpoint_mc/1000).toFixed(0)+' C':'-';
+ document.getElementById('duty').textContent=(d.duty/10).toFixed(0)+' %';
+ document.getElementById('stage').textContent=d.stage_name+' ('+(d.n_stages?d.stage+1:0)+'/'+d.n_stages+')';
+ document.getElementById('el').textContent=fmt(d.total_ms);
+ if(d.profile!=lastProf){lastProf=d.profile;document.getElementById('prof').value=d.profile;}
+ hist.push({t:d.temp_mc/1000,sp:d.setpoint_mc/1000});
+ if(hist.length>MAXP)hist.shift();
+ if(d.state!='running'&&hist.length>1&&d.setpoint_mc==0&&hist.length>MAXP)hist=[];
+ draw();
+}
+fetch('/api/profiles').then(function(r){return r.json();}).then(function(j){
+ profs=j.profiles;var sel=document.getElementById('prof');
+ profs.forEach(function(p,i){var o=document.createElement('option');o.value=i;o.textContent=p;sel.appendChild(o);});
+});
+var es=new EventSource('/api/events');
+es.onmessage=function(e){update(JSON.parse(e.data));};
+es.onerror=function(){document.getElementById('sub').textContent='link lost, retrying...';};
+</script>
+</body>
+</html>

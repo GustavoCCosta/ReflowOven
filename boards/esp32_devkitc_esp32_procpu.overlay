@@ -1,0 +1,111 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Reflow oven hardware map for ESP32-DevKitC (WROOM), APP CPU disabled.
+ *
+ *   SPI2 (HSPI): SCLK GPIO14, MISO GPIO12, MOSI GPIO13
+ *     CS0 GPIO15 -> MAX6675 thermocouple front-end
+ *     CS1 GPIO5  -> ST7789 320x240 panel (DC GPIO21, RST GPIO27, BL GPIO22)
+ *   GPIO4        -> SSR gate (active high, 3V3 logic input of the SSR module)
+ *   GPIO32/33    -> rotary encoder A/B
+ *   GPIO25       -> encoder push button (to GND)
+ *
+ * Check every pin against your own wiring before applying mains power.
+ */
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	chosen {
+		zephyr,display = &st7789;
+	};
+
+	reflow_outputs {
+		compatible = "gpio-leds";
+
+		ssr0: ssr_0 {
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+			label = "SSR heater";
+		};
+	};
+
+	reflow_buttons {
+		compatible = "gpio-keys";
+
+		btn0: button_0 {
+			gpios = <&gpio0 25 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Encoder push";
+			zephyr,code = <INPUT_KEY_ENTER>;
+		};
+	};
+
+	encoder: encoder {
+		compatible = "gpio-qdec";
+		gpios = <&gpio1 0 GPIO_PULL_UP>, <&gpio1 1 GPIO_PULL_UP>;
+		steps-per-period = <4>;
+		zephyr,axis = <INPUT_REL_WHEEL>;
+		sample-time-us = <2000>;
+		idle-timeout-ms = <200>;
+		status = "okay";
+	};
+
+	lcd_backlight: lcd-backlight {
+		compatible = "gpio-leds";
+
+		backlight0: backlight_0 {
+			gpios = <&gpio0 22 GPIO_ACTIVE_HIGH>;
+			label = "LCD backlight";
+		};
+	};
+
+	aliases {
+		reflow-ssr = &ssr0;
+		reflow-thermocouple = &max6675;
+		reflow-backlight = &backlight0;
+	};
+};
+
+&spi2 {
+	status = "okay";
+	cs-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>, <&gpio0 5 GPIO_ACTIVE_LOW>;
+
+	max6675: max6675@0 {
+		compatible = "maxim,max6675";
+		reg = <0>;
+		spi-max-frequency = <2000000>;
+		status = "okay";
+	};
+
+	st7789: st7789v@1 {
+		compatible = "sitronix,st7789v";
+		reg = <1>;
+		spi-max-frequency = <20000000>;
+		status = "okay";
+
+		cmd-data-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio0 27 GPIO_ACTIVE_LOW>;
+
+		width = <320>;
+		height = <240>;
+		x-offset = <0>;
+		y-offset = <0>;
+
+		/* Landscape (MV set), 16 bpp. */
+		mdac = <0x60>;
+		colmod = <0x55>;
+		lcm = <0x2c>;
+		gctrl = <0x35>;
+		vrhs = <0x0b>;
+		vdvs = <0x20>;
+		vcom = <0x20>;
+		gamma = <0x01>;
+
+		porch-param = [0c 0c 00 33 33];
+		cmd2en-param = [5a 69 02 01];
+		pwctrl1-param = [a4 a1];
+		pvgam-param = [d0 00 02 07 0a 28 32 44 42 06 0e 12 14 17];
+		nvgam-param = [d0 00 02 07 0a 28 31 54 47 0e 1c 17 1b 1e];
+		ram-param = [00 f0];
+		rgb-param = [cd 08 14];
+	};
+};

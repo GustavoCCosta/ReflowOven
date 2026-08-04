@@ -1,0 +1,6 @@
+tests:
+  reflow.logic:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags: reflow pid profile

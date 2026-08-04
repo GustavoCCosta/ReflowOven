@@ -1,0 +1,62 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Reflow oven bring-up map for Raspberry Pi Pico 2 (RP2350A, Cortex-M33).
+ *
+ * Minimal build on purpose: thermocouple + SSR + shell over USB. No panel and
+ * no radio, so the first hardware run has as few variables as possible.
+ * See boards/rpi_pico2_rp2350a_m33.conf for the matching Kconfig fragment and
+ * overlays/rpi_pico2_display_encoder.overlay for the next step.
+ *
+ *   SPI0 (board default pinctrl): SCK GP18, MOSI GP19, MISO GP16
+ *     CS GP20      -> MAX6675 thermocouple front-end (read only, MISO + CS)
+ *   GP15           -> SSR gate (active high, 3V3 logic input of the SSR module)
+ *   USB            -> CDC ACM: console, log and 'reflow' shell on the same cable
+ *
+ * GP17 is left alone: the board pinctrl muxes it as the SPI0 hardware CSn, so
+ * chip select is done with a plain GPIO (GP20) that Zephyr holds low for the
+ * whole 16-bit frame — which is what the MAX6675 needs.
+ *
+ * Check every pin against your own wiring before applying mains power.
+ */
+
+/ {
+	chosen {
+		/* USB is the only cable: console, logging and shell all on it. */
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+	};
+
+	reflow_outputs {
+		compatible = "gpio-leds";
+
+		ssr0: ssr_0 {
+			gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+			label = "SSR heater";
+		};
+	};
+
+	aliases {
+		reflow-ssr = &ssr0;
+		reflow-thermocouple = &max6675;
+	};
+};
+
+&spi0 {
+	status = "okay";
+	cs-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
+
+	max6675: max6675@0 {
+		compatible = "maxim,max6675";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+		status = "okay";
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "CDC_ACM_0";
+	};
+};
