@@ -22,7 +22,7 @@
 
 LOG_MODULE_REGISTER(reflow_wifi, CONFIG_REFLOW_LOG_LEVEL);
 
-static K_SEM_DEFINE(l4_ready, 0, 1);
+K_SEM_DEFINE(l4_ready, 0, 1);
 static struct net_mgmt_event_callback mgmt_cb;
 
 static void mgmt_handler(struct net_mgmt_event_callback *cb, uint32_t event,

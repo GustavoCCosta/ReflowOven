@@ -26,7 +26,8 @@ ZBUS_CHAN_DEFINE(reflow_telemetry_chan, struct reflow_telemetry,
 #define PUBLISH_MS CONFIG_REFLOW_PUBLISH_PERIOD_MS
 #define ABS_MAX_MC (CONFIG_REFLOW_ABS_MAX_TEMP_C * 1000)
 
-static K_MSGQ_DEFINE(cmd_q, sizeof(struct reflow_cmd), 8, 4);
+/* No 'static' here: K_MSGQ_DEFINE already declares its buffer static. */
+K_MSGQ_DEFINE(cmd_q, sizeof(struct reflow_cmd), 8, 4);
 
 static const struct pid_cfg pid_cfg = {
 	.kp = CONFIG_REFLOW_PID_KP_MILLI / 1000.0f,

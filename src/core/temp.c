@@ -12,7 +12,7 @@ LOG_MODULE_REGISTER(reflow_temp, CONFIG_REFLOW_LOG_LEVEL);
 
 #define THERMOCOUPLE_NODE DT_ALIAS(reflow_thermocouple)
 
-#if !DT_NODE_HAS_STATUS(THERMOCOUPLE_NODE, okay)
+#if !DT_NODE_HAS_STATUS_OKAY(THERMOCOUPLE_NODE)
 #error "Missing devicetree alias 'reflow-thermocouple' (see boards/*.overlay)"
 #endif
 

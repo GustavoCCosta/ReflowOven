@@ -201,7 +201,10 @@ configdefault INPUT_GPIO_KEYS
 configdefault NET_DHCPV4
 	default y if REFLOW_NET
 
-configdefault NET_SOCKETS_POLL_MAX
+# Sockets poll() sizing lives in ZVFS since NET_SOCKETS started selecting it
+# (the old NET_SOCKETS_POLL_MAX no longer exists). The web UI polls one
+# listening socket plus REFLOW_NET_MAX_CLIENTS connections.
+configdefault ZVFS_POLL_MAX
 	default 8 if REFLOW_NET
 
 configdefault NET_MAX_CONTEXTS
