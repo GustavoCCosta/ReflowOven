@@ -1,0 +1,28 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Adds a USB Ethernet function (CDC ECM) to the Pico 2 build, so the web UI is
+ * reachable over the same cable that powers the board. Stacks on top of
+ * boards/rpi_pico2_rp2350a_m33.overlay, whose cdc_acm node stays in place: the
+ * device ends up composite, shell and network on one cable.
+ *
+ *   west build -p always -b rpi_pico2/rp2350a/m33 reflow_oven -S usb-webui
+ *
+ * The MAC addresses come from the IANA documentation range (00:00:5E:00:53:xx).
+ * remote-mac-address is what the host will use for its end of the link and is
+ * published as a USB string descriptor, so it is a 12 hex digit string.
+ * local-mac-address is fixed on purpose: without it the class generates a
+ * random MAC at every boot and the host sees a brand new adapter each time.
+ */
+
+&zephyr_udc0 {
+	/* snippet_ prefix per the Zephyr snippet naming convention. Nothing in
+	 * the C code uses this label: usb_net.c finds the device by compatible.
+	 */
+	snippet_usb_webui_ecm: cdc_ecm0 {
+		compatible = "zephyr,cdc-ecm-ethernet";
+		remote-mac-address = "00005E005301";
+		local-mac-address = [00 00 5E 00 53 00];
+		status = "okay";
+	};
+};

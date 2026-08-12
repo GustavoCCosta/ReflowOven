@@ -25,6 +25,7 @@
 #include <zephyr/net/socket.h>
 
 #include "../core/app.h"
+#include "../telemetry_json.h"
 #include "index_html.h"
 #include "net.h"
 
@@ -34,7 +35,7 @@ LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
 #define MAX_CLIENTS CONFIG_REFLOW_NET_MAX_CLIENTS
 #define PUSH_MS     CONFIG_REFLOW_NET_PUSH_PERIOD_MS
 #define REQ_BUF_SZ  512
-#define JSON_BUF_SZ 320
+#define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
 static struct k_mutex snap_lock;
 static struct reflow_telemetry snapshot;
@@ -55,27 +56,12 @@ ZBUS_CHAN_ADD_OBS(reflow_telemetry_chan, reflow_httpd_lsnr, 4);
 static int build_state_json(char *buf, size_t len)
 {
 	struct reflow_telemetry t;
-	const struct reflow_profile *prof;
-	const char *stage = "-";
 
 	k_mutex_lock(&snap_lock, K_FOREVER);
 	t = snapshot;
 	k_mutex_unlock(&snap_lock);
 
-	prof = reflow_profile_get(t.profile_idx);
-	if (prof != NULL && t.stage_idx < prof->n_stages) {
-		stage = prof->stages[t.stage_idx].name;
-	}
-
-	return snprintk(buf, len,
-			"{\"temp_mc\":%d,\"setpoint_mc\":%d,\"duty\":%u,"
-			"\"state\":\"%s\",\"fault\":\"%s\",\"profile\":%u,"
-			"\"stage\":%u,\"n_stages\":%u,\"stage_name\":\"%s\","
-			"\"stage_ms\":%u,\"total_ms\":%u,\"uptime_ms\":%u}",
-			t.temp_mc, t.setpoint_mc, t.duty_permille,
-			reflow_state_str(t.state), reflow_fault_str(t.fault),
-			t.profile_idx, t.stage_idx, t.n_stages, stage,
-			t.stage_ms, t.total_ms, t.uptime_ms);
+	return reflow_telemetry_json(&t, buf, len);
 }
 
 static int send_all(int fd, const char *data, size_t len)

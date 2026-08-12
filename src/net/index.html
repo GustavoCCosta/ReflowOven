@@ -28,6 +28,7 @@ td.v{color:#eee;text-align:right}
 <button onclick='cmd("start")'>Start</button>
 <button class='stop' onclick='cmd("stop")'>Stop</button>
 <button class='warn' onclick='cmd("clear")'>Clear fault</button>
+<button id='usb' class='warn' style='display:none' onclick='usbConnect()'>Conectar por USB</button>
 </div>
 <canvas id='c' width='640' height='220'></canvas>
 <table>
@@ -38,7 +39,7 @@ td.v{color:#eee;text-align:right}
 </table>
 <script>
 var hist=[],MAXP=600,profs=[],lastProf=-1;
-function cmd(id){var q='/api/cmd?id='+id;if(id=='profile')q+='&arg='+document.getElementById('prof').value;fetch(q,{method:'POST'});}
+var cmd=function(id){var q='/api/cmd?id='+id;if(id=='profile')q+='&arg='+document.getElementById('prof').value;fetch(q,{method:'POST'});};
 document.getElementById('prof').onchange=function(){cmd('profile');};
 function fmt(t){var s=Math.floor(t/1000),m=Math.floor(s/60);return m+':'+('0'+(s%60)).slice(-2);}
 function draw(){
@@ -55,7 +56,7 @@ function draw(){
  line('sp','#57f');line('t','#2b6');
 }
 function update(d){
- document.getElementById('temp').innerHTML=(d.temp_mc/1000).toFixed(1)+' &deg;C';
+ document.getElementById('temp').innerHTML=(d.temp_valid?(d.temp_mc/1000).toFixed(1):'--')+' &deg;C';
  var s=d.state+(d.fault!='none'?' - FAULT: '+d.fault:'');
  var sub=document.getElementById('sub');sub.textContent=s;
  sub.className=d.fault!='none'?'bad':'';
@@ -64,18 +65,75 @@ function update(d){
  document.getElementById('stage').textContent=d.stage_name+' ('+(d.n_stages?d.stage+1:0)+'/'+d.n_stages+')';
  document.getElementById('el').textContent=fmt(d.total_ms);
  if(d.profile!=lastProf){lastProf=d.profile;document.getElementById('prof').value=d.profile;}
- hist.push({t:d.temp_mc/1000,sp:d.setpoint_mc/1000});
+ if(d.temp_valid)hist.push({t:d.temp_mc/1000,sp:d.setpoint_mc/1000});
  if(hist.length>MAXP)hist.shift();
  if(d.state!='running'&&hist.length>1&&d.setpoint_mc==0&&hist.length>MAXP)hist=[];
  draw();
 }
-fetch('/api/profiles').then(function(r){return r.json();}).then(function(j){
- profs=j.profiles;var sel=document.getElementById('prof');
- profs.forEach(function(p,i){var o=document.createElement('option');o.value=i;o.textContent=p;sel.appendChild(o);});
-});
-var es=new EventSource('/api/events');
-es.onmessage=function(e){update(JSON.parse(e.data));};
-es.onerror=function(){document.getElementById('sub').textContent='link lost, retrying...';};
+function addProfiles(list){var sel=document.getElementById('prof');sel.innerHTML='';
+ list.forEach(function(p,i){var o=document.createElement('option');o.value=i;o.textContent=p;sel.appendChild(o);});}
+function say(t){document.getElementById('sub').textContent=t;}
+
+/* Transporte 1: servido pelo forno (HTTP + server-sent events). */
+function startHttp(){
+ fetch('/api/profiles').then(function(r){return r.json();}).then(function(j){addProfiles(j.profiles);});
+ var es=new EventSource('/api/events');
+ es.onmessage=function(e){update(JSON.parse(e.data));};
+ es.onerror=function(){say('link lost, retrying...');};
+}
+
+/* Transporte 2: pagina local falando com a porta serial USB (Web Serial API).
+   Exige contexto seguro: localhost ou file:// no Chrome/Edge de desktop. */
+var port=null,writer=null,poll=null;
+function usbWrite(line){if(writer)writer.write(new TextEncoder().encode(line+'\r\n'));}
+function usbCmd(id){if(id=='profile')usbWrite('reflow profile '+document.getElementById('prof').value);
+ else usbWrite('reflow '+(id=='clear'?'clear':id));}
+function usbClose(){if(poll){clearInterval(poll);poll=null;}writer=null;port=null;
+ document.getElementById('usb').style.display='';say('desconectado');}
+async function usbConnect(){
+ if(!navigator.serial){say('este navegador nao tem Web Serial (use Chrome ou Edge)');return;}
+ try{
+  port=await navigator.serial.requestPort({filters:[{usbVendorId:0x2fe3}]});
+  await port.open({baudRate:115200});
+ }catch(e){say('nao conectou: '+e.message);return;}
+ document.getElementById('usb').style.display='none';
+ say('conectado pela porta USB');
+ writer=port.writable.getWriter();
+ var buf='';
+ (async function read(){
+  var dec=new TextDecoder(),r=port.readable.getReader();
+  try{
+   while(true){
+    var q=await r.read();
+    if(q.done)break;
+    buf+=dec.decode(q.value,{stream:true});
+    var lines=buf.split('\n');buf=lines.pop();
+    lines.forEach(function(ln){
+     /* A linha de JSON e inconfundivel: ignora eco, prompt e VT100 do shell. */
+     var i=ln.indexOf('{');
+     if(i>=0){try{update(JSON.parse(ln.slice(i)));}catch(e){}return;}
+     var m=ln.match(/\[(\d+)\]\s+(.+?)\s*$/);
+     if(m){profs[+m[1]]=m[2];addProfiles(profs);}
+    });
+   }
+  }catch(e){}
+  r.releaseLock();usbClose();
+ })();
+ usbWrite('');
+ usbWrite('reflow profile');
+ poll=setInterval(function(){usbWrite('reflow json');},1000);
+}
+navigator.serial&&navigator.serial.addEventListener('disconnect',function(){usbClose();});
+
+/* Servida pelo forno, ou aberta localmente? */
+var overHttp=(location.protocol=='http:'||location.protocol=='https:')&&
+             !/^(localhost|127\.|\[::1\])/.test(location.hostname);
+if(overHttp){startHttp();}
+else{
+ document.getElementById('usb').style.display='';
+ say(navigator.serial?'clique em Conectar por USB':'abra no Chrome ou Edge para usar a porta USB');
+ cmd=usbCmd;
+}
 </script>
 </body>
 </html>

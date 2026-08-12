@@ -28,3 +28,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Snapshots/zips do proprio fonte
+*.zip
+*.tar.gz

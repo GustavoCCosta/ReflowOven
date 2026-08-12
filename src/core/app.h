@@ -32,6 +32,7 @@ enum reflow_fault {
 struct reflow_telemetry {
 	uint32_t uptime_ms;
 	int32_t temp_mc;      /* measured temperature, milli-degC */
+	uint8_t temp_valid;   /* 0 when temp_mc is stale: show "--", never the value */
 	int32_t setpoint_mc;  /* 0 when idle */
 	uint16_t duty_permille;
 	uint8_t state;        /* enum reflow_state */

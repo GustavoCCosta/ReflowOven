@@ -87,8 +87,12 @@ static void ui_update(const struct reflow_telemetry *t)
 		}
 	}
 
-	lv_label_set_text_fmt(lbl_temp, "%d.%01d C",
-			      t->temp_mc / 1000, (abs(t->temp_mc) % 1000) / 100);
+	if (t->temp_valid) {
+		lv_label_set_text_fmt(lbl_temp, "%d.%01d C", t->temp_mc / 1000,
+				      (abs(t->temp_mc) % 1000) / 100);
+	} else {
+		lv_label_set_text(lbl_temp, "--.- C");
+	}
 
 	if (t->setpoint_mc != 0) {
 		lv_label_set_text_fmt(lbl_setpoint, "sp %d C", t->setpoint_mc / 1000);

@@ -122,15 +122,18 @@ config REFLOW_SHELL
 	  during bring-up; can be removed from a production build.
 
 config REFLOW_NET
-	bool "Wi-Fi and web UI"
+	bool "Web UI over the network"
 	select NETWORKING
-	select WIFI
 	select NET_IPV4
 	select NET_TCP
 	select NET_SOCKETS
 	select NET_MGMT
 	select NET_MGMT_EVENT
 	select NET_CONNECTION_MANAGER
+	help
+	  Single page web UI with a live temperature plot, served by an HTTP
+	  server written on plain BSD sockets. The server does not care how the
+	  link is provided - pick that below.
 
 # Credentials stay outside the 'if' below so that setting them in prj.conf
 # never warns in a build without networking.
@@ -143,6 +146,72 @@ config REFLOW_WIFI_PSK
 	default ""
 
 if REFLOW_NET
+
+choice REFLOW_LINK
+	prompt "Network link for the web UI"
+	default REFLOW_LINK_WIFI
+
+config REFLOW_LINK_WIFI
+	bool "Wi-Fi station"
+	select WIFI
+	help
+	  Joins an existing network. Needs a radio: fine on ESP32, not
+	  available on a bare RP2350.
+
+config REFLOW_LINK_USB_ECM
+	bool "USB Ethernet (CDC ECM)"
+	select USB_DEVICE_STACK_NEXT
+	select NET_L2_ETHERNET
+	select NET_DHCPV4_SERVER
+	select HWINFO
+	help
+	  The oven appears as a USB Ethernet adapter on the same cable that
+	  powers it, and hands the host an address over DHCP. No radio needed.
+
+	  Host support: Linux and macOS bind CDC ECM out of the box; Windows
+	  has no in-box ECM driver and needs a third party one.
+
+	  Requires a zephyr,cdc-ecm-ethernet node in the devicetree, and
+	  CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT must be off, because this
+	  module initialises the USB device stack itself (registering the
+	  shell's CDC ACM function along with the Ethernet one).
+
+endchoice
+
+if REFLOW_LINK_USB_ECM
+
+config REFLOW_USB_IPV4_ADDR
+	string "Oven address on the USB link"
+	default "192.168.7.1"
+
+config REFLOW_USB_IPV4_MASK
+	string "Netmask of the USB link"
+	default "255.255.255.0"
+
+config REFLOW_USB_DHCP_POOL_START
+	string "First address handed to the host"
+	default "192.168.7.2"
+
+config REFLOW_USB_VID
+	hex "USB vendor ID"
+	default 0x2fe3
+	help
+	  0x2fe3 is the Zephyr project VID, acceptable for local development
+	  only. Use your own VID/PID pair before distributing hardware.
+
+config REFLOW_USB_PID
+	hex "USB product ID"
+	default 0x0007
+
+config REFLOW_USB_MANUFACTURER
+	string "USB manufacturer string"
+	default "Reflow oven project"
+
+config REFLOW_USB_PRODUCT
+	string "USB product string"
+	default "Reflow oven"
+
+endif # REFLOW_LINK_USB_ECM
 
 config REFLOW_NET_HTTP_PORT
 	int "HTTP port"
@@ -197,9 +266,10 @@ configdefault INPUT_GPIO_QDEC
 configdefault INPUT_GPIO_KEYS
 	default y if REFLOW_UI_INPUT
 
-# --- Wi-Fi and web UI ---
+# --- web UI ---
+# DHCP client for the Wi-Fi link only: on the USB link the oven is the server.
 configdefault NET_DHCPV4
-	default y if REFLOW_NET
+	default y if REFLOW_LINK_WIFI
 
 # Sockets poll() sizing lives in ZVFS since NET_SOCKETS started selecting it
 # (the old NET_SOCKETS_POLL_MAX no longer exists). The web UI polls one
@@ -228,10 +298,10 @@ configdefault NET_BUF_TX_COUNT
 configdefault HEAP_MEM_POOL_SIZE
 	default 32768 if REFLOW_NET
 
-# Espressif Wi-Fi driver and its L2. Both symbols only exist on Espressif
-# SoCs, so this block is a no-op on any other target.
+# Espressif Wi-Fi driver: the symbol only exists on Espressif SoCs, so this is
+# a no-op on any other target.
 configdefault WIFI_ESP32
-	default y if REFLOW_NET
+	default y if REFLOW_LINK_WIFI
 
 configdefault NET_L2_ETHERNET
 	default y if REFLOW_NET
@@ -239,3 +309,12 @@ configdefault NET_L2_ETHERNET
 # --- shell ---
 configdefault SHELL_STACK_SIZE
 	default 4096 if REFLOW_SHELL
+
+# Identity of the CDC ACM console helper, when a board fragment enables it.
+# As defaults rather than assignments, so they simply do not apply in builds
+# where usb_net.c owns the USB device stack instead.
+configdefault CDC_ACM_SERIAL_PID
+	default 0x0004 if REFLOW_SHELL
+
+configdefault CDC_ACM_SERIAL_PRODUCT_STRING
+	default "Reflow oven" if REFLOW_SHELL

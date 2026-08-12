@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Web UI over USB Ethernet, as a Zephyr snippet:
+#
+#   west build -p always -b rpi_pico2/rp2350a/m33 reflow_oven -S usb-webui
+#
+# Same effect as passing EXTRA_DTC_OVERLAY_FILE and EXTRA_CONF_FILE by hand,
+# but with nothing for a shell to mangle - no long paths, no dots, no quoting.
+#
+# The two files live in overlays/ so that the manual form keeps working and
+# there is a single copy of each; hence the relative paths out of this
+# directory. Paths in a snippet.yml are relative to the snippet.yml itself.
+#
+# Requires a target with a USB device controller (a zephyr_udc0 node): the
+# Pico 2 has one, a plain ESP32-WROOM does not.
+
+name: usb-webui
+append:
+  EXTRA_DTC_OVERLAY_FILE: ../../overlays/rpi_pico2_usb_webui.overlay
+  EXTRA_CONF_FILE: ../../overlays/rpi_pico2_usb_webui.conf

@@ -24,6 +24,8 @@ static const struct device *const tc_dev = DEVICE_DT_GET(THERMOCOUPLE_NODE);
 
 static int32_t last_mc;
 static bool have_last;
+/* Latches while reads are failing, so the error is logged once per outage. */
+static bool err_logged;
 
 int reflow_temp_init(void)
 {
@@ -33,6 +35,7 @@ int reflow_temp_init(void)
 	}
 
 	have_last = false;
+	err_logged = false;
 	LOG_INF("thermocouple %s ready", tc_dev->name);
 	return 0;
 }
@@ -45,8 +48,17 @@ int reflow_temp_read(int32_t *temp_mc)
 
 	ret = sensor_sample_fetch(tc_dev);
 	if (ret != 0) {
-		/* MAX6675 reports an open thermocouple as a fetch error. */
-		LOG_ERR("sample_fetch: %d", ret);
+		/*
+		 * The MAX6675 reports an open thermocouple as -ENOENT here (it
+		 * has a dedicated detection bit). Log the first failure only:
+		 * at 4 reads per second a permanent open circuit would other-
+		 * wise bury the console.
+		 */
+		if (!err_logged) {
+			err_logged = true;
+			LOG_ERR("sample_fetch: %d%s", ret,
+				ret == -ENOENT ? " (thermocouple open)" : "");
+		}
 		return ret;
 	}
 
@@ -55,14 +67,20 @@ int reflow_temp_read(int32_t *temp_mc)
 		ret = sensor_channel_get(tc_dev, SENSOR_CHAN_DIE_TEMP, &val);
 	}
 	if (ret != 0) {
-		LOG_ERR("channel_get: %d", ret);
+		if (!err_logged) {
+			err_logged = true;
+			LOG_ERR("channel_get: %d", ret);
+		}
 		return ret;
 	}
 
 	mc = val.val1 * 1000 + val.val2 / 1000;
 
 	if (mc < TEMP_MIN_MC || mc > TEMP_MAX_MC) {
-		LOG_ERR("implausible reading %d mC", mc);
+		if (!err_logged) {
+			err_logged = true;
+			LOG_ERR("implausible reading %d mC", mc);
+		}
 		return -ERANGE;
 	}
 
@@ -74,6 +92,11 @@ int reflow_temp_read(int32_t *temp_mc)
 	if (have_last && (mc - last_mc > 40000 || last_mc - mc > 40000)) {
 		LOG_WRN("spike rejected: %d -> %d mC", last_mc, mc);
 		mc = last_mc;
+	}
+
+	if (err_logged) {
+		err_logged = false;
+		LOG_INF("thermocouple reading restored");
 	}
 
 	last_mc = mc;

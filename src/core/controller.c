@@ -85,6 +85,7 @@ static void publish(void)
 	struct reflow_telemetry t = {
 		.uptime_ms = (uint32_t)k_uptime_get(),
 		.temp_mc = ctx.temp_mc,
+		.temp_valid = ctx.temp_valid ? 1U : 0U,
 		.setpoint_mc = ctx.state == REFLOW_STATE_RUNNING ? ctx.setpoint_mc : 0,
 		.duty_permille = ctx.duty,
 		.state = (uint8_t)ctx.state,
@@ -267,9 +268,25 @@ static void controller_thread(void *a, void *b, void *c)
 				ctx.temp_valid = true;
 				new_sample = true;
 			} else {
+				bool was_valid = ctx.temp_valid;
+
 				ctx.temp_valid = false;
-				if (ctx.state != REFLOW_STATE_FAULT) {
+
+				/*
+				 * Losing the thermocouple only latches a fault while
+				 * the element can be energised. With the oven idle the
+				 * SSR is already off, so there is nothing to protect
+				 * against: mark the reading invalid and let START
+				 * refuse to run (it requires a valid temperature).
+				 * That also means an oven powered up with no
+				 * thermocouple plugged in does not need a 'clear'.
+				 */
+				if (ctx.state == REFLOW_STATE_RUNNING) {
 					enter_fault(REFLOW_FAULT_SENSOR);
+				} else if (was_valid) {
+					LOG_WRN("thermocouple reading lost while %s",
+						reflow_state_str(ctx.state));
+					publish();
 				}
 			}
 		}

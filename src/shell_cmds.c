@@ -3,7 +3,12 @@
  *
  * Serial console commands. Optional: CONFIG_REFLOW_SHELL.
  * Handy for bring-up before the display or Wi-Fi exist:
- *   reflow status | start | stop | clear | profile <n>
+ *   reflow status | json | start | stop | clear | profile <n>
+ *
+ * 'json' is the machine-readable twin of 'status': one line, same object the
+ * HTTP server serves at /api/state. It is what lets a host - a script, or the
+ * local Web Serial page in web/ - drive the oven over the USB serial port
+ * without parsing human text.
  */
 
 #include <stdlib.h>
@@ -12,6 +17,7 @@
 #include <zephyr/shell/shell.h>
 
 #include "core/app.h"
+#include "telemetry_json.h"
 
 static struct reflow_telemetry last;
 
@@ -43,8 +49,12 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "state      : %s", reflow_state_str(last.state));
 	shell_print(sh, "fault      : %s", reflow_fault_str(last.fault));
-	shell_print(sh, "temperature: %d.%03d C", last.temp_mc / 1000,
-		    abs(last.temp_mc) % 1000);
+	if (last.temp_valid) {
+		shell_print(sh, "temperature: %d.%03d C", last.temp_mc / 1000,
+			    abs(last.temp_mc) % 1000);
+	} else {
+		shell_print(sh, "temperature: --  (no valid reading)");
+	}
 	shell_print(sh, "setpoint   : %d.%03d C", last.setpoint_mc / 1000,
 		    abs(last.setpoint_mc) % 1000);
 	shell_print(sh, "duty       : %u.%u %%", last.duty_permille / 10,
@@ -54,6 +64,21 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "stage      : %u/%u, %u s (total %u s)",
 		    last.n_stages ? last.stage_idx + 1U : 0U, last.n_stages,
 		    last.stage_ms / 1000U, last.total_ms / 1000U);
+	return 0;
+}
+
+static int cmd_json(const struct shell *sh, size_t argc, char **argv)
+{
+	char buf[REFLOW_JSON_BUF_SZ];
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	(void)reflow_telemetry_json(&last, buf, sizeof(buf));
+	/* One line, always starting with '{': that is how a host picks it out
+	 * of the shell's echo and prompt without parsing them.
+	 */
+	shell_print(sh, "%s", buf);
 	return 0;
 }
 
@@ -91,6 +116,7 @@ static int cmd_profile(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(reflow_sub,
 	SHELL_CMD(status, NULL, "Show controller state", cmd_status),
+	SHELL_CMD(json, NULL, "Same state as one line of JSON", cmd_json),
 	SHELL_CMD(start, NULL, "Start the selected profile", cmd_start),
 	SHELL_CMD(stop, NULL, "Abort the run", cmd_stop),
 	SHELL_CMD(clear, NULL, "Clear a latched fault", cmd_clear),
