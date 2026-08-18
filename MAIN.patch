@@ -1,0 +1,494 @@
+# MAIN.patch — trabalho aprovado do ReflowOven
+# base: origin/main = 7d9e9ed
+# aplique com:  git apply --3way MAIN.patch
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 65cff17..1024b1e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,7 +30,7 @@ target_sources_ifdef(CONFIG_REFLOW_UI_INPUT   app PRIVATE src/ui/input_ui.c)
+ target_sources_ifdef(CONFIG_REFLOW_SHELL      app PRIVATE src/shell_cmds.c)
+ 
+ # Web UI: the server plus exactly one link implementation.
+-target_sources_ifdef(CONFIG_REFLOW_NET           app PRIVATE src/net/httpd.c src/net/l4.c)
++target_sources_ifdef(CONFIG_REFLOW_NET           app PRIVATE src/net/httpd.c src/net/cmdparse.c src/net/l4.c)
+ target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI     app PRIVATE src/net/wifi.c)
+ target_sources_ifdef(CONFIG_REFLOW_LINK_USB_ECM  app PRIVATE src/net/usb_net.c)
+ 
+diff --git a/src/net/cmdparse.c b/src/net/cmdparse.c
+new file mode 100644
+index 0000000..8cf7e10
+--- /dev/null
++++ b/src/net/cmdparse.c
+@@ -0,0 +1,199 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++
++#include <errno.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <string.h>
++
++#include "cmdparse.h"
++
++/*
++ * Longest token we are willing to look at. Every key and value this endpoint
++ * understands is far shorter; anything longer cannot be a valid command, so it
++ * is rejected instead of truncated. Truncation is how "startle" becomes
++ * "start".
++ */
++#define TOKEN_MAX 16
++
++static int hex_digit(char c)
++{
++	if (c >= '0' && c <= '9') {
++		return c - '0';
++	}
++	if (c >= 'a' && c <= 'f') {
++		return c - 'a' + 10;
++	}
++	if (c >= 'A' && c <= 'F') {
++		return c - 'A' + 10;
++	}
++	return -1;
++}
++
++/*
++ * Percent-decode [src, end) into out. '+' is left alone: this endpoint takes
++ * no free text, and decoding it as a space would only add a second spelling
++ * for values that must match exactly.
++ */
++static int decode(const char *src, const char *end, char *out, size_t out_sz)
++{
++	size_t n = 0;
++
++	while (src < end) {
++		char c = *src++;
++
++		if (c == '%') {
++			int hi, lo;
++
++			if (end - src < 2) {
++				return -EINVAL;
++			}
++			hi = hex_digit(*src++);
++			lo = hex_digit(*src++);
++			if (hi < 0 || lo < 0) {
++				return -EINVAL;
++			}
++			c = (char)((hi << 4) | lo);
++			/* %00 would end the token early: refuse it outright. */
++			if (c == '\0') {
++				return -EINVAL;
++			}
++		}
++		if (n + 1 >= out_sz) {
++			return -ENOSPC;
++		}
++		out[n++] = c;
++	}
++	out[n] = '\0';
++	return 0;
++}
++
++/* Whole-string unsigned decimal. Anything else is malformed, not zero. */
++static int parse_index(const char *s, int32_t *out)
++{
++	uint32_t v = 0;
++
++	if (*s == '\0') {
++		return -EINVAL;
++	}
++	for (; *s != '\0'; s++) {
++		if (*s < '0' || *s > '9') {
++			return -EINVAL;
++		}
++		v = v * 10U + (uint32_t)(*s - '0');
++		if (v > 0xFFFFU) {
++			return -EINVAL;
++		}
++	}
++	*out = (int32_t)v;
++	return 0;
++}
++
++static int command_id(const char *value, uint8_t *id)
++{
++	if (strcmp(value, "start") == 0) {
++		*id = REFLOW_CMD_START;
++	} else if (strcmp(value, "stop") == 0) {
++		*id = REFLOW_CMD_STOP;
++	} else if (strcmp(value, "clear") == 0) {
++		*id = REFLOW_CMD_CLEAR_FAULT;
++	} else if (strcmp(value, "profile") == 0) {
++		*id = REFLOW_CMD_SELECT_PROFILE;
++	} else {
++		return -EINVAL;
++	}
++	return 0;
++}
++
++enum reflow_cmd_parse reflow_cmd_parse(const char *query, struct reflow_cmd *cmd)
++{
++	const char *p = query;
++	bool have_id = false;
++	bool have_arg = false;
++	bool ambiguous = false;   /* a parameter appeared twice */
++	bool malformed = false;   /* something in the query does not parse */
++	bool saw_stop = false;
++	uint8_t id = 0;
++	int32_t arg = 0;
++
++	if (query == NULL) {
++		return REFLOW_CMD_PARSE_REJECT;
++	}
++
++	while (*p != '\0') {
++		char key[TOKEN_MAX];
++		char value[TOKEN_MAX];
++		const char *seg_end = strchr(p, '&');
++		const char *eq;
++
++		if (seg_end == NULL) {
++			seg_end = p + strlen(p);
++		}
++		eq = memchr(p, '=', (size_t)(seg_end - p));
++
++		if (decode(p, eq != NULL ? eq : seg_end, key, sizeof(key)) != 0) {
++			/*
++			 * The key does not decode, so we cannot tell whether it
++			 * was 'id'. Refuse the whole request rather than guess.
++			 */
++			malformed = true;
++			key[0] = '\0';
++		}
++		if (eq == NULL ||
++		    decode(eq + 1, seg_end, value, sizeof(value)) != 0) {
++			malformed = true;
++			value[0] = '\0';
++		}
++
++		if (strcmp(key, "id") == 0) {
++			uint8_t this_id;
++
++			if (have_id) {
++				ambiguous = true;
++			}
++			have_id = true;
++
++			if (command_id(value, &this_id) != 0) {
++				malformed = true;
++			} else {
++				id = this_id;
++				if (this_id == REFLOW_CMD_STOP) {
++					saw_stop = true;
++				}
++			}
++		} else if (strcmp(key, "arg") == 0) {
++			if (have_arg) {
++				ambiguous = true;
++			}
++			have_arg = true;
++
++			if (parse_index(value, &arg) != 0) {
++				malformed = true;
++			}
++		}
++		/* Unknown keys are ignored: they are not commands. */
++
++		p = (*seg_end == '&') ? seg_end + 1 : seg_end;
++	}
++
++	if (!have_id) {
++		return REFLOW_CMD_PARSE_REJECT;
++	}
++
++	if (ambiguous || malformed) {
++		/*
++		 * The request is not a command. If a stop was one of the
++		 * readings, act on it anyway: refusing a stop is the one
++		 * failure mode this endpoint must not have.
++		 */
++		if (saw_stop) {
++			cmd->id = REFLOW_CMD_STOP;
++			cmd->arg = 0;
++			return REFLOW_CMD_PARSE_REJECT_STOP;
++		}
++		return REFLOW_CMD_PARSE_REJECT;
++	}
++
++	cmd->id = id;
++	cmd->arg = (id == REFLOW_CMD_SELECT_PROFILE) ? arg : 0;
++	return REFLOW_CMD_PARSE_OK;
++}
+diff --git a/src/net/cmdparse.h b/src/net/cmdparse.h
+new file mode 100644
+index 0000000..4aa3a68
+--- /dev/null
++++ b/src/net/cmdparse.h
+@@ -0,0 +1,30 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Command dispatch for POST /api/cmd, split out of httpd.c so that it can be
++ * exercised without a network stack. Pure logic: no sockets, no Zephyr
++ * subsystems, no global state.
++ */
++
++#ifndef REFLOW_NET_CMDPARSE_H_
++#define REFLOW_NET_CMDPARSE_H_
++
++#include "../core/app.h"
++
++enum reflow_cmd_parse {
++	/* cmd is valid: post it and answer 204. */
++	REFLOW_CMD_PARSE_OK = 0,
++	/* Nothing is executed; answer 400. */
++	REFLOW_CMD_PARSE_REJECT,
++	/*
++	 * The request is malformed or ambiguous, but a stop was among the
++	 * possible readings. cmd holds REFLOW_CMD_STOP: post it, then answer
++	 * 400. Stopping an oven that was already idle costs nothing; ignoring
++	 * a stop the operator meant to send does not.
++	 */
++	REFLOW_CMD_PARSE_REJECT_STOP,
++};
++
++enum reflow_cmd_parse reflow_cmd_parse(const char *query, struct reflow_cmd *cmd);
++
++#endif /* REFLOW_NET_CMDPARSE_H_ */
+diff --git a/src/net/httpd.c b/src/net/httpd.c
+index a64ef9a..f16b5a2 100644
+--- a/src/net/httpd.c
++++ b/src/net/httpd.c
+@@ -17,7 +17,6 @@
+ 
+ #include <errno.h>
+ #include <stdio.h>
+-#include <stdlib.h>
+ #include <string.h>
+ 
+ #include <zephyr/kernel.h>
+@@ -26,6 +25,7 @@
+ 
+ #include "../core/app.h"
+ #include "../telemetry_json.h"
++#include "cmdparse.h"
+ #include "index_html.h"
+ #include "net.h"
+ 
+@@ -111,48 +111,25 @@ static int send_profiles(int fd)
+ 	return send_response(fd, "200 OK", "application/json", body, (size_t)n);
+ }
+ 
+-/* Extract an unsigned decimal value for "key=" from a query string. */
+-static int query_int(const char *query, const char *key, int fallback)
+-{
+-	const char *p = query != NULL ? strstr(query, key) : NULL;
+-
+-	if (p == NULL) {
+-		return fallback;
+-	}
+-	p += strlen(key);
+-	if (*p != '=') {
+-		return fallback;
+-	}
+-	return atoi(p + 1);
+-}
+-
+ static int handle_cmd(int fd, const char *query)
+ {
++	enum reflow_cmd_parse res;
+ 	struct reflow_cmd cmd;
+ 
+-	if (query == NULL) {
+-		return send_response(fd, "400 Bad Request", "text/plain", "", 0);
+-	}
+-
+-	if (strstr(query, "id=start") != NULL) {
+-		cmd.id = REFLOW_CMD_START;
+-		cmd.arg = 0;
+-	} else if (strstr(query, "id=stop") != NULL) {
+-		cmd.id = REFLOW_CMD_STOP;
+-		cmd.arg = 0;
+-	} else if (strstr(query, "id=clear") != NULL) {
+-		cmd.id = REFLOW_CMD_CLEAR_FAULT;
+-		cmd.arg = 0;
+-	} else if (strstr(query, "id=profile") != NULL) {
+-		cmd.id = REFLOW_CMD_SELECT_PROFILE;
+-		cmd.arg = query_int(query, "arg", 0);
+-	} else {
++	res = reflow_cmd_parse(query, &cmd);
++	if (res == REFLOW_CMD_PARSE_REJECT) {
+ 		return send_response(fd, "400 Bad Request", "text/plain", "", 0);
+ 	}
+ 
+ 	if (reflow_cmd_post(&cmd, K_MSEC(100)) != 0) {
+ 		return send_response(fd, "503 Service Unavailable", "text/plain", "", 0);
+ 	}
++
++	if (res == REFLOW_CMD_PARSE_REJECT_STOP) {
++		/* The stop was honoured; the request itself was still malformed. */
++		LOG_WRN("ambiguous /api/cmd request, stopped as a precaution");
++		return send_response(fd, "400 Bad Request", "text/plain", "", 0);
++	}
+ 	return send_response(fd, "204 No Content", "text/plain", "", 0);
+ }
+ 
+diff --git a/tests/logic/CMakeLists.txt b/tests/logic/CMakeLists.txt
+index 4d09f41..56d4f48 100644
+--- a/tests/logic/CMakeLists.txt
++++ b/tests/logic/CMakeLists.txt
+@@ -4,11 +4,13 @@ cmake_minimum_required(VERSION 3.20.0)
+ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+ project(reflow_logic_tests LANGUAGES C)
+ 
+-set(CORE ${CMAKE_CURRENT_SOURCE_DIR}/../../src/core)
++set(SRC  ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
++set(CORE ${SRC}/core)
+ 
+ target_sources(app PRIVATE
+   src/main.c
+   ${CORE}/pid.c
+   ${CORE}/profile.c
++  ${SRC}/net/cmdparse.c
+ )
+-target_include_directories(app PRIVATE ${CORE})
++target_include_directories(app PRIVATE ${CORE} ${SRC})
+diff --git a/tests/logic/src/main.c b/tests/logic/src/main.c
+index 7e68432..63e022b 100644
+--- a/tests/logic/src/main.c
++++ b/tests/logic/src/main.c
+@@ -10,6 +10,7 @@
+ 
+ #include "pid.h"
+ #include "profile.h"
++#include "net/cmdparse.h"
+ 
+ /* ------------------------------------------------------------------ PID */
+ 
+@@ -239,3 +240,126 @@ ZTEST(reflow_profile, test_nominal_duration)
+ }
+ 
+ ZTEST_SUITE(reflow_profile, NULL, NULL, NULL, NULL, NULL);
++
++/* ------------------------------------------------------- command dispatch */
++
++/*
++ * RFO-B01. The dispatch used to be four unanchored strstr() calls, with
++ * "id=start" tested first: any occurrence of that substring anywhere in the
++ * query started a run, including inside the value of another parameter.
++ */
++
++static enum reflow_cmd_parse parse(const char *query, struct reflow_cmd *cmd)
++{
++	cmd->id = 0xFFU;
++	cmd->arg = -1;
++	return reflow_cmd_parse(query, cmd);
++}
++
++ZTEST(reflow_cmdparse, test_stop_is_not_hijacked_by_another_parameter)
++{
++	struct reflow_cmd cmd;
++
++	zassert_equal(parse("id=stop&note=id=start", &cmd), REFLOW_CMD_PARSE_OK,
++		      "a well formed stop must be accepted");
++	zassert_equal(cmd.id, REFLOW_CMD_STOP,
++		      "?id=stop&note=id=start started the oven (id=%u)", cmd.id);
++}
++
++ZTEST(reflow_cmdparse, test_key_must_match_whole)
++{
++	struct reflow_cmd cmd;
++
++	/* "myid" is not "id", and "startle" is not "start". */
++	zassert_equal(parse("myid=start", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "a key ending in 'id' must not be taken for 'id'");
++	zassert_equal(parse("id=startle", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "the value must match the command in full");
++	zassert_equal(parse("x=id=start", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "a command hidden in another value must not be executed");
++}
++
++ZTEST(reflow_cmdparse, test_repeated_id_is_rejected)
++{
++	struct reflow_cmd cmd;
++
++	/* Neither first-wins nor last-wins: an ambiguous oven command is an error. */
++	zassert_equal(parse("id=start&id=clear", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "a repeated id must not be resolved, it must be rejected");
++	zassert_equal(parse("id=start&id=start", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "a repeated id is ambiguous even when the values agree");
++
++	/* ... but if a stop was one of the readings, the safe outcome is to stop. */
++	zassert_equal(parse("id=start&id=stop", &cmd), REFLOW_CMD_PARSE_REJECT_STOP,
++		      "stop must win over any other possible reading");
++	zassert_equal(cmd.id, REFLOW_CMD_STOP, "ambiguous stop must still stop");
++}
++
++ZTEST(reflow_cmdparse, test_unknown_command_executes_nothing)
++{
++	struct reflow_cmd cmd;
++
++	zassert_equal(parse("id=bake", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "unknown command must be rejected");
++	zassert_equal(cmd.id, 0xFFU, "nothing may be written on rejection");
++}
++
++ZTEST(reflow_cmdparse, test_empty_and_missing_query)
++{
++	struct reflow_cmd cmd;
++
++	zassert_equal(parse(NULL, &cmd), REFLOW_CMD_PARSE_REJECT, "no query");
++	zassert_equal(parse("", &cmd), REFLOW_CMD_PARSE_REJECT, "empty query");
++	zassert_equal(parse("arg=2", &cmd), REFLOW_CMD_PARSE_REJECT, "no id at all");
++}
++
++ZTEST(reflow_cmdparse, test_id_without_a_value)
++{
++	struct reflow_cmd cmd;
++
++	zassert_equal(parse("id", &cmd), REFLOW_CMD_PARSE_REJECT, "bare 'id'");
++	zassert_equal(parse("id=", &cmd), REFLOW_CMD_PARSE_REJECT, "empty value");
++	zassert_equal(parse("id=&arg=1", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "empty value with another parameter");
++}
++
++ZTEST(reflow_cmdparse, test_percent_encoding_is_decoded)
++{
++	struct reflow_cmd cmd;
++
++	zassert_equal(parse("id=%73tart", &cmd), REFLOW_CMD_PARSE_OK,
++		      "%%73tart must decode to start");
++	zassert_equal(cmd.id, REFLOW_CMD_START, "decoded start");
++
++	zassert_equal(parse("%69d=st%6Fp", &cmd), REFLOW_CMD_PARSE_OK,
++		      "the key is percent-decoded too");
++	zassert_equal(cmd.id, REFLOW_CMD_STOP, "decoded stop");
++
++	/* A broken escape is a malformed request, not a command. */
++	zassert_equal(parse("id=%zztart", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "invalid hex escape");
++	zassert_equal(parse("id=star%7", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "truncated escape");
++	zassert_equal(parse("id=%00start", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "an embedded NUL must not truncate the value");
++}
++
++ZTEST(reflow_cmdparse, test_profile_argument)
++{
++	struct reflow_cmd cmd;
++
++	zassert_equal(parse("id=profile&arg=2", &cmd), REFLOW_CMD_PARSE_OK, "profile 2");
++	zassert_equal(cmd.id, REFLOW_CMD_SELECT_PROFILE, "profile command");
++	zassert_equal(cmd.arg, 2, "arg not parsed, got %d", cmd.arg);
++
++	zassert_equal(parse("arg=2&id=profile", &cmd), REFLOW_CMD_PARSE_OK,
++		      "parameter order must not matter");
++	zassert_equal(cmd.arg, 2, "arg not parsed when it comes first");
++
++	zassert_equal(parse("id=profile&arg=2x", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "a non numeric arg is malformed");
++	zassert_equal(parse("id=profile&arg=1&arg=2", &cmd), REFLOW_CMD_PARSE_REJECT,
++		      "a repeated arg is ambiguous");
++}
++
++ZTEST_SUITE(reflow_cmdparse, NULL, NULL, NULL, NULL, NULL);
