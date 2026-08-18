@@ -57,14 +57,36 @@ caminho com -Patch.
 }
 $Patch = (Resolve-Path $Patch).Path
 
-$sujo = git status --porcelain
-if ($sujo) {
-    Write-Host $sujo
-    Fail "arvore suja. commite ou descarte antes de aplicar o patch dos agentes."
+# Arquivo NAO rastreado nao atrapalha o `git apply` nem o `checkout -B`. O que
+# atrapalha e alteracao pendente em arquivo versionado, que o patch pode tentar
+# tocar. Entao: falha so no segundo caso, e avisa no primeiro.
+$modificado = git status --porcelain --untracked-files=no
+if ($modificado) {
+    Write-Host $modificado
+    Fail @"
+ha alteracoes pendentes em arquivos versionados. commite ou descarte antes de
+aplicar o patch dos agentes:
+    git stash push -u        (guarda e devolve depois com 'git stash pop')
+    git checkout -- .        (descarta, sem volta)
+"@
 }
 
+$naoRastreado = git status --porcelain --untracked-files=normal |
+                Where-Object { $_ -like '??*' }
+if ($naoRastreado) {
+    Write-Host "arquivos nao rastreados na arvore (nao impedem nada):" -ForegroundColor Yellow
+    $naoRastreado | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    Write-Host ""
+}
+
+# Copia para fora da arvore ANTES de trocar de branch. Se o MAIN.patch estiver
+# versionado numa branch e nao na outra, o `checkout` apaga o arquivo do disco
+# e o `git apply` seguinte nao acha mais nada para aplicar.
+$patchTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("MAIN-" + [guid]::NewGuid().ToString("N") + ".patch")
+Copy-Item -LiteralPath $Patch -Destination $patchTmp -Force
+
 # O cabecalho do MAIN.patch declara sobre qual commit ele foi gerado.
-$baseDeclarada = (Select-String -Path $Patch -Pattern '^#\s*base:\s*origin/main\s*=\s*(\S+)' |
+$baseDeclarada = (Select-String -Path $patchTmp -Pattern '^#\s*base:\s*origin/main\s*=\s*(\S+)' |
                   Select-Object -First 1).Matches.Groups[1].Value
 
 Info "buscando origin..."
@@ -84,26 +106,59 @@ if ($baseDeclarada) {
     }
 }
 
+# --------------------------------------------------- de onde sai a branch
+# Se a main local tiver commits seus que ainda nao foram empurrados, a branch
+# tem que sair dela — senao o `merge --ff-only` do fim nao funciona e o seu
+# trabalho local fica de fora do push.
+$temMainLocal = (git rev-parse --verify --quiet refs/heads/main)
+if ($temMainLocal) {
+    git merge-base --is-ancestor origin/main main
+    $mainDescende = ($LASTEXITCODE -eq 0)
+    $aFrente = (git rev-list --count origin/main..main).Trim()
+    git merge-base --is-ancestor main origin/main
+    $mainAtrasada = ($LASTEXITCODE -eq 0)
+
+    if (-not $mainDescende -and -not $mainAtrasada) {
+        Fail @"
+sua main local divergiu de origin/main (nem uma contem a outra). resolva isso
+antes — provavelmente com 'git pull --rebase' — e rode de novo.
+"@
+    }
+    if ($mainDescende -and [int]$aFrente -gt 0) {
+        $baseRef = "main"
+        Info "sua main local esta $aFrente commit(s) a frente de origin/main;"
+        Info "a branch vai sair da main local, para nao deixar esse trabalho de fora."
+    } else {
+        $baseRef = "origin/main"
+    }
+} else {
+    $baseRef = "origin/main"
+}
+
 # ------------------------------------------------------------------ aplicar
-Info "criando branch $Branch a partir de origin/main ($mainAtual)"
-git checkout --quiet -B $Branch origin/main
+Info "criando branch $Branch a partir de $baseRef"
+git checkout --quiet -B $Branch $baseRef
 if ($LASTEXITCODE -ne 0) { Fail "nao consegui criar a branch." }
 
+if (-not (Test-Path $patchTmp)) { Fail "a copia temporaria do patch sumiu: $patchTmp" }
+
 Info "aplicando $Patch"
-git apply --3way --whitespace=nowarn $Patch
+git apply --3way --whitespace=nowarn $patchTmp
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Fail @"
-o patch nao aplicou. quase sempre significa que o MAIN.patch foi gerado sobre
-uma main mais antiga. avise o Gerente com o commit atual ($mainAtual) e peca a
-regeracao. a branch $Branch ficou criada e limpa; nada foi perdido.
+o patch nao aplicou sobre $baseRef. quase sempre significa que o MAIN.patch foi
+gerado sobre uma main mais antiga: avise o Gerente com o commit atual
+($mainAtual) e peca a regeracao.
+a branch $Branch ficou criada; volte com 'git checkout main' se quiser desfazer.
 "@
 }
+Remove-Item -LiteralPath $patchTmp -Force -ErrorAction SilentlyContinue
 
 # ------------------------------------------------------------------- resumo
 Write-Host ""
-Info "aplicado. resumo:"
-git diff --stat origin/main
+Info "aplicado. resumo (contra $baseRef):"
+git diff --stat $baseRef
 Write-Host ""
 Info "arquivos com conflito de 3-way (se houver):"
 git diff --name-only --diff-filter=U
@@ -111,8 +166,9 @@ Write-Host ""
 
 Write-Host "PAREI AQUI DE PROPOSITO. Nada foi commitado." -ForegroundColor Green
 Write-Host ""
-Write-Host "Revise:        git diff origin/main"
-Write-Host "Se aprovar:    git add -A"
+Write-Host "Revise:        git diff $baseRef"
+Write-Host "Se aprovar:    git add -A          (confira o 'git status' antes:"
+Write-Host "                                    -A pega arquivo nao rastreado tambem)"
 Write-Host "               git commit -m ""agentes: <resumo do que entrou>"""
 Write-Host "               git checkout main"
 Write-Host "               git merge --ff-only $Branch"
