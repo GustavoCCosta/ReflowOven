@@ -82,8 +82,31 @@ if ($naoRastreado) {
 # Copia para fora da arvore ANTES de trocar de branch. Se o MAIN.patch estiver
 # versionado numa branch e nao na outra, o `checkout` apaga o arquivo do disco
 # e o `git apply` seguinte nao acha mais nada para aplicar.
+#
+# A copia tambem NORMALIZA o patch. Baixar um arquivo de texto no Windows
+# costuma converter LF em CRLF e as vezes come a quebra de linha final; o
+# `git apply` recusa os dois com "corrupt patch at line N", apontando a ultima
+# linha. Um patch e um formato binario-ish: LF e nada de BOM.
 $patchTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("MAIN-" + [guid]::NewGuid().ToString("N") + ".patch")
-Copy-Item -LiteralPath $Patch -Destination $patchTmp -Force
+
+$txt = [System.IO.File]::ReadAllText($Patch, [System.Text.Encoding]::UTF8)
+$consertos = @()
+if ($txt.Length -gt 0 -and $txt[0] -eq [char]0xFEFF) {
+    $txt = $txt.Substring(1); $consertos += "BOM removido"
+}
+if ($txt.Contains("`r`n")) {
+    $txt = $txt -replace "`r`n", "`n"; $consertos += "CRLF -> LF"
+}
+if (-not $txt.EndsWith("`n")) {
+    $txt += "`n"; $consertos += "quebra de linha final recolocada"
+}
+[System.IO.File]::WriteAllText($patchTmp, $txt, (New-Object System.Text.UTF8Encoding($false)))
+
+if ($consertos.Count -gt 0) {
+    Write-Host ("patch normalizado antes de aplicar: " + ($consertos -join ", ")) -ForegroundColor Yellow
+    Write-Host "(o arquivo original nao foi tocado)" -ForegroundColor Yellow
+    Write-Host ""
+}
 
 # O cabecalho do MAIN.patch declara sobre qual commit ele foi gerado.
 $baseDeclarada = (Select-String -Path $patchTmp -Pattern '^#\s*base:\s*origin/main\s*=\s*(\S+)' |
