@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""flow — ferramenta local do processo do ReflowOven.
+
+Neste ambiente nao ha escrita no GitHub: o proxy libera leitura e barra push e
+API. Entao o `flow` cuida so da parte local (git, patches, build, testes), e o
+quadro de trabalho vive em documentos do Project, manipulados pelo agente com
+project_read / project_write.
+
+Fluxo tipico de uma sessao:
+
+    flow setup                          # clona origin (leitura funciona)
+    flow base --mainpatch main.patch    # BASE = origin/main + trabalho aprovado
+    flow work                           # branch de trabalho a partir da BASE
+    ... edita ...
+    flow test && flow matrix
+    flow patch -o pr.diff               # o diff que vai para o doc do PR
+
+Q.A.:
+    flow base --mainpatch main.patch
+    flow work && flow apply pr.diff
+    flow test
+    flow mutate                         # o teste do teste
+    flow test                           # AGORA o teste novo tem que FALHAR
+    flow mutate --restaurar
+
+Gerente (ao aprovar):
+    flow base --mainpatch main.patch
+    flow work && flow apply pr.diff
+    flow mainpatch -o novo_main.patch   # diff completo contra origin/main
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_PADRAO = "https://github.com/GustavoCCosta/ReflowOven.git"
+# A aplicacao mora DENTRO do workspace west (mesmo layout do PC do Gustavo),
+# senao o `west twister` nao encontra o workspace e falha.
+_WS = Path(os.environ.get("ZEPHYR_WS", str(Path.home() / "zephyrproject")))
+DIR_PADRAO = Path(os.environ.get("REFLOW_DIR", str(_WS / "reflow_oven")))
+SRC_DIRS_DEFAULT = ["src", "include", "boards", "overlays", "snippets", "dts"]
+
+BR_BASE = "flow-base"
+BR_TRAB = "flow-trabalho"
+
+C = {"r": "\033[0m", "b": "\033[1m", "red": "\033[31m", "grn": "\033[32m",
+     "yel": "\033[33m", "dim": "\033[2m"}
+if not sys.stdout.isatty():
+    C = {k: "" for k in C}
+
+
+def die(msg: str, code: int = 1):
+    print(f"{C['red']}erro:{C['r']} {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run(cmd, check=True, cwd=None, entrada=None):
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, input=entrada)
+    if check and p.returncode != 0:
+        die(f"comando falhou: {' '.join(map(str, cmd))}\n"
+            f"{(p.stderr or p.stdout or '').strip()}")
+    return p
+
+
+def git(*args, check=True, entrada=None, cwd=None):
+    return run(["git", *map(str, args)], check=check, cwd=cwd or str(DIR_PADRAO),
+               entrada=entrada)
+
+
+def exige_repo():
+    if not (DIR_PADRAO / ".git").exists():
+        die(f"nao encontrei o repositorio em {DIR_PADRAO}. rode `flow setup` primeiro.")
+
+
+def token() -> str:
+    for var in ("REFLOW_GH_TOKEN",):
+        if os.environ.get(var):
+            return os.environ[var]
+    for cam in (Path.home() / ".reflow-token", Path.home() / ".ghtok"):
+        if cam.exists():
+            return cam.read_text().strip()
+    die("token nao encontrado. grave o PAT em ~/.reflow-token "
+        "(so precisa de leitura: Contents read-only)")
+
+
+def sha_curto(ref="origin/main") -> str:
+    return git("rev-parse", "--short", ref).stdout.strip()
+
+
+def ler_patch(caminho: str) -> str:
+    if caminho == "-":
+        return sys.stdin.read()
+    p = Path(caminho)
+    if not p.exists():
+        die(f"patch nao encontrado: {caminho}")
+    return p.read_text()
+
+
+def extrai_diff(texto: str) -> str:
+    """Aceita um patch cru ou o corpo de um doc com o diff em bloco ```diff."""
+    m = re.search(r"```(?:diff|patch)\s*\n(.*?)```", texto, re.S)
+    corpo = m.group(1) if m else texto
+    linhas = corpo.splitlines()
+    # descarta preambulo antes do primeiro cabecalho de diff
+    for i, ln in enumerate(linhas):
+        if ln.startswith(("diff --git ", "--- ", "Index: ")):
+            return "\n".join(linhas[i:]).rstrip() + "\n"
+    return corpo
+
+
+def vazio(texto: str) -> bool:
+    util = [l for l in texto.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")]
+    return not util
+
+
+# ------------------------------------------------------------------- setup
+
+def cmd_setup(a):
+    url = a.repo
+    if DIR_PADRAO.exists() and (DIR_PADRAO / ".git").exists():
+        print(f"{C['dim']}ja existe em {DIR_PADRAO}; atualizando{C['r']}")
+    else:
+        DIR_PADRAO.parent.mkdir(parents=True, exist_ok=True)
+        alvo = url.replace("https://", f"https://x-access-token:{token()}@")
+        p = run(["git", "clone", "--quiet", alvo, str(DIR_PADRAO)], check=False)
+        if p.returncode != 0:
+            die("clone falhou. confira o token (precisa de Contents: read).\n"
+                + (p.stderr or "").strip())
+    git("config", "user.email", "agente@reflow.local")
+    git("config", "user.name", a.papel or "flow-agent")
+    git("fetch", "--quiet", "origin")
+    print(f"{C['grn']}ok{C['r']} {DIR_PADRAO} · origin/main = {sha_curto()}")
+    print(f"{C['dim']}lembrete: push nao funciona neste ambiente. "
+          f"o resultado sai por patch.{C['r']}")
+
+
+# -------------------------------------------------------------------- base
+
+def cmd_base(a):
+    exige_repo()
+    git("fetch", "--quiet", "origin")
+    if git("status", "--porcelain").stdout.strip():
+        if not a.forcar:
+            die("arvore suja. comite, descarte, ou use --forcar para recriar a BASE")
+        git("reset", "--hard")
+        git("clean", "-fd")
+    git("checkout", "--quiet", "-B", BR_BASE, "origin/main")
+    base_sha = sha_curto()
+
+    if a.mainpatch:
+        texto = ler_patch(a.mainpatch)
+        if vazio(texto):
+            print(f"{C['dim']}MAIN.patch vazio — BASE e a propria origin/main{C['r']}")
+        else:
+            diff = extrai_diff(texto)
+            p = git("apply", "--3way", "--whitespace=nowarn", "-",
+                    entrada=diff, check=False)
+            if p.returncode != 0:
+                die("MAIN.patch nao aplica sobre origin/main.\n"
+                    "provavelmente o Gustavo empurrou algo novo e o patch precisa\n"
+                    "ser regerado pelo Gerente sobre a main atual.\n"
+                    + (p.stderr or "").strip())
+            git("add", "-A")
+            git("-c", "user.email=agente@reflow.local", "-c", "user.name=flow",
+                "commit", "--quiet", "-m", f"base: trabalho aprovado sobre {base_sha}")
+            print(f"{C['grn']}MAIN.patch aplicado{C['r']}")
+
+    h = hashlib.sha256(
+        (ler_patch(a.mainpatch) if a.mainpatch else "").encode()).hexdigest()[:16]
+    print(f"BASE pronta · origin/main={base_sha} · mainpatch=sha256:{h}")
+    print(f"{C['dim']}anote esses dois valores no cabecalho do PR{C['r']}")
+
+
+def cmd_work(a):
+    exige_repo()
+    if git("rev-parse", "--verify", BR_BASE, check=False).returncode != 0:
+        die("BASE nao existe. rode `flow base` primeiro.")
+    git("checkout", "--quiet", "-B", BR_TRAB, BR_BASE)
+    print(f"em {C['b']}{BR_TRAB}{C['r']} (a partir da BASE)")
+
+
+# ------------------------------------------------------------------- patch
+
+def commit_trabalho(msg: str) -> bool:
+    """Fixa o trabalho num commit da branch de trabalho.
+
+    Isto NAO e cosmetico: `flow mutate --restaurar` recupera o codigo a partir do
+    HEAD. Se o trabalho estiver solto na arvore, restaurar apaga tudo. Commitar
+    antes e o que torna a mutacao reversivel.
+    """
+    git("add", "-A")
+    if not git("diff", "--cached", "--quiet", check=False).returncode:
+        return False
+    git("-c", "user.email=agente@reflow.local", "-c", "user.name=flow",
+        "commit", "--quiet", "-m", msg)
+    return True
+
+
+def cmd_patch(a):
+    exige_repo()
+    br = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if br != BR_TRAB:
+        die(f"voce esta em '{br}'. rode `flow work` antes de trabalhar.")
+    commit_trabalho(a.mensagem or "trabalho do PR")
+    diff = git("diff", "--binary", BR_BASE, "HEAD").stdout
+    if not diff.strip():
+        die("nenhuma diferenca em relacao a BASE — nao ha o que entregar")
+    saida = Path(a.saida)
+    saida.write_text(diff)
+    n_arq = len(re.findall(r"^diff --git ", diff, re.M))
+    print(f"{C['grn']}ok{C['r']} {saida} · {n_arq} arquivo(s) · "
+          f"{len(diff.splitlines())} linhas")
+    print(f"origin/main={sha_curto()}")
+    print(f"\n{C['dim']}cole o conteudo dentro de um bloco ```diff no doc do PR{C['r']}")
+
+
+def cmd_apply(a):
+    exige_repo()
+    diff = extrai_diff(ler_patch(a.patch))
+    p = git("apply", "--3way", "--whitespace=nowarn", "-", entrada=diff, check=False)
+    if p.returncode != 0:
+        die("o patch nao aplica sobre a BASE.\n"
+            "isso normalmente significa que o PR foi gerado sobre uma BASE mais\n"
+            "antiga. devolva ao Dev pedindo regeracao.\n" + (p.stderr or "").strip())
+    commit_trabalho(f"PR aplicado a partir de {Path(a.patch).name}")
+    print(f"{C['grn']}patch aplicado e fixado em commit{C['r']}")
+    print(git("diff", "--stat", BR_BASE, "HEAD").stdout)
+
+
+def cmd_mainpatch(a):
+    """Gerente: gera o MAIN.patch novo — diff COMPLETO contra origin/main."""
+    exige_repo()
+    commit_trabalho("estado aprovado")
+    diff = git("diff", "--binary", "origin/main", "HEAD").stdout
+    if not diff.strip():
+        die("arvore identica a origin/main — nada aprovado para registrar")
+    cab = (f"# MAIN.patch — trabalho aprovado do ReflowOven\n"
+           f"# base: origin/main = {sha_curto()}\n"
+           f"# aplique com:  git apply --3way MAIN.patch\n")
+    Path(a.saida).write_text(cab + diff)
+    print(f"{C['grn']}ok{C['r']} {a.saida} · diff completo contra origin/main "
+          f"({sha_curto()})")
+
+
+# ------------------------------------------------------------------ mutate
+
+def cmd_mutate(a):
+    """Reverte SO o codigo-fonte para o estado da BASE, mantendo os testes do PR.
+
+    Se a suite continuar verde, o teste novo nao prova nada -> reprovar.
+    """
+    exige_repo()
+    src = [d for d in (a.src or SRC_DIRS_DEFAULT) if (DIR_PADRAO / d).exists()]
+    if not src:
+        die("nenhum diretorio de codigo-fonte encontrado; passe --src")
+    if a.restaurar:
+        git("checkout", "HEAD", "--", *src)
+        print("codigo-fonte restaurado ao estado do PR.")
+        return
+    # Sem commit, HEAD == BASE e o `--restaurar` apagaria o trabalho em vez de
+    # devolve-lo. Exigir arvore limpa e o que impede essa perda.
+    if git("status", "--porcelain").stdout.strip():
+        die("ha alteracoes nao commitadas. rode `flow patch` (que commita) antes\n"
+            "de mutar — senao `flow mutate --restaurar` perderia esse trabalho.")
+    if git("rev-parse", "HEAD").stdout == git("rev-parse", BR_BASE).stdout:
+        die("HEAD e igual a BASE: nao ha patch para mutar. aplique o PR primeiro.")
+    git("checkout", BR_BASE, "--", *src)
+    print(f"{C['yel']}MUTACAO ATIVA{C['r']} — {', '.join(src)} voltaram ao estado da "
+          f"BASE; testes do PR mantidos.")
+    print(f"\nrode agora:  flow test")
+    print(f"{C['b']}esperado: o teste novo FALHA.{C['r']} se passar, o teste e verde "
+          f"falso -> reprove o PR.")
+    print(f"\ndepois:  flow mutate --restaurar")
+
+
+# ------------------------------------------------------------- test/matrix
+
+def ambiente_zephyr() -> dict:
+    ws = Path(os.environ.get("ZEPHYR_WS", str(Path.home() / "zephyrproject")))
+    env = dict(os.environ)
+    envfile = ws / ".flow-env"
+    if envfile.exists():
+        for ln in envfile.read_text().splitlines():
+            m = re.match(r'export ([A-Z_]+)="?([^"]*)"?$', ln.strip())
+            if m:
+                env[m.group(1)] = m.group(2)
+    env.setdefault("ZEPHYR_BASE", str(ws / "zephyr"))
+    env.setdefault("ZEPHYR_TOOLCHAIN_VARIANT", "host")
+    venv = ws / ".venv" / "bin"
+    if venv.exists():
+        env["PATH"] = f"{venv}:{env['PATH']}"
+    return env
+
+
+def cmd_test(a):
+    exige_repo()
+    env = ambiente_zephyr()
+    cmd = ["west", "twister", "-T", "tests", "-p", a.board, "--inline-logs"]
+    p = subprocess.run(cmd, cwd=str(DIR_PADRAO), env=env, text=True)
+    sys.exit(p.returncode)
+
+
+def descobrir_configs(root: Path, prefixo: str = "REFLOW_"):
+    """Separa bool livres de blocos `choice`, ignorando int/hex/string.
+
+    Ligar `-DCONFIG_REFLOW_CTRL_PERIOD_MS=y` num int quebraria a build sem dizer
+    nada sobre modularidade.
+    """
+    livres: dict[str, dict[str, str]] = {}
+    escolhas: list[dict] = []
+    arquivos = [p for p in list(root.rglob("Kconfig")) + list(root.rglob("Kconfig.*"))
+                if ".git" not in p.parts and "build" not in p.parts]
+    for kc in arquivos:
+        try:
+            linhas = kc.read_text(errors="ignore").splitlines()
+        except Exception:
+            continue
+        pilha_if: list[str] = []
+        choice_atual: dict | None = None
+        nome: str | None = None
+        for ln in linhas:
+            s = ln.strip()
+            m = re.match(r"^if\s+([A-Z0-9_]+)\s*$", s)
+            if m:
+                pilha_if.append(m.group(1)); continue
+            if s == "endif":
+                if pilha_if: pilha_if.pop()
+                continue
+            if re.match(r"^choice\b", s):
+                choice_atual = {"membros": [], "guards": {g: "y" for g in pilha_if}}
+                continue
+            if s == "endchoice":
+                if choice_atual and len(choice_atual["membros"]) > 1:
+                    escolhas.append(choice_atual)
+                choice_atual = None
+                continue
+            m = re.match(r"^(?:menu)?config\s+([A-Z0-9_]+)", s)
+            if m:
+                nome = m.group(1); continue
+            if nome and re.match(r"^bool\b", s):
+                if nome.startswith(prefixo):
+                    if choice_atual is not None:
+                        choice_atual["membros"].append(nome)
+                    else:
+                        livres[nome] = {g: "y" for g in pilha_if}
+                nome = None
+            elif nome and re.match(r"^(int|hex|string)\b", s):
+                nome = None
+    livres = {k: v for k, v in livres.items() if not v}   # guardado por `if` nao e livre
+    return livres, escolhas
+
+
+def cmd_matrix(a):
+    exige_repo()
+    livres_d, escolhas = descobrir_configs(DIR_PADRAO)
+    cfgs = sorted(livres_d)
+    if not cfgs and not escolhas:
+        die("nenhuma opcao bool CONFIG_REFLOW_* encontrada nos Kconfig")
+    combos = [("todas-ligadas", {c: "y" for c in cfgs}),
+              ("nucleo-apenas", {c: "n" for c in cfgs})]
+    for c in cfgs:
+        combos.append((f"sem-{c.replace('REFLOW_', '').lower()}",
+                       {k: ("n" if k == c else "y") for k in cfgs}))
+    for ch in escolhas:
+        for membro in ch["membros"]:
+            base = {k: "y" for k in cfgs}
+            base.update(ch["guards"])
+            for outro in ch["membros"]:
+                base[outro] = "y" if outro == membro else "n"
+            combos.append((f"link-{membro.replace('REFLOW_', '').lower()}", base))
+    if a.listar:
+        for nome, conf in combos:
+            print(f"{nome}: " + " ".join(f"{k}={v}" for k, v in sorted(conf.items())))
+        return
+
+    env = ambiente_zephyr()
+    falhas = []
+    print(f"{len(combos)} combinacoes · board={a.board} · opcoes: {', '.join(cfgs)}\n")
+    for nome, conf in combos:
+        d = DIR_PADRAO / "build" / f"matrix-{nome}"
+        cmd = ["west", "build", "-p", "always", "-b", a.board, "-d", str(d), "."]
+        cmd += ["--"] + [f"-DCONFIG_{k}={v}" for k, v in conf.items()]
+        p = subprocess.run(cmd, cwd=str(DIR_PADRAO), env=env,
+                           capture_output=True, text=True)
+        ok = p.returncode == 0
+        print(f"  {'OK   ' if ok else 'FALHA'}  {nome}")
+        if not ok:
+            falhas.append((nome, (p.stderr or p.stdout or "")[-1500:]))
+    if falhas:
+        print(f"\n{C['red']}{len(falhas)} combinacao(oes) quebrada(s){C['r']}")
+        for nome, log in falhas:
+            print(f"\n--- {nome} ---\n{log}")
+        sys.exit(1)
+    print(f"\n{C['grn']}matriz de modularidade OK{C['r']}")
+
+
+def cmd_status(a):
+    exige_repo()
+    br = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    print(f"diretorio : {DIR_PADRAO}")
+    print(f"branch    : {br}")
+    print(f"origin/main: {sha_curto()}")
+    tem_base = git("rev-parse", "--verify", BR_BASE, check=False).returncode == 0
+    print(f"BASE      : {'existe' if tem_base else 'AUSENTE (rode flow base)'}")
+    if tem_base and br == BR_TRAB:
+        st = git("diff", "--stat", BR_BASE).stdout.strip()
+        print(f"vs BASE   : {st.splitlines()[-1] if st else 'sem alteracoes'}")
+    sujo = git("status", "--porcelain").stdout.strip()
+    print(f"arvore    : {'suja' if sujo else 'limpa'}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="flow", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", help="clona o repositorio (leitura)")
+    s.add_argument("--repo", default=REPO_PADRAO)
+    s.add_argument("--papel", default=None)
+    s.set_defaults(f=cmd_setup)
+
+    s = sub.add_parser("base", help="monta a BASE = origin/main + MAIN.patch")
+    s.add_argument("--mainpatch", default=None, help="arquivo, ou - para stdin")
+    s.add_argument("--forcar", action="store_true")
+    s.set_defaults(f=cmd_base)
+
+    s = sub.add_parser("work", help="branch de trabalho a partir da BASE")
+    s.set_defaults(f=cmd_work)
+
+    s = sub.add_parser("patch", help="[Dev] gera o diff do PR contra a BASE")
+    s.add_argument("-o", "--saida", default="pr.diff")
+    s.add_argument("-m", "--mensagem", default=None)
+    s.set_defaults(f=cmd_patch)
+
+    s = sub.add_parser("apply", help="aplica um patch de PR sobre a BASE")
+    s.add_argument("patch")
+    s.set_defaults(f=cmd_apply)
+
+    s = sub.add_parser("mainpatch", help="[Gerente] gera o MAIN.patch novo")
+    s.add_argument("-o", "--saida", default="MAIN.patch")
+    s.set_defaults(f=cmd_mainpatch)
+
+    s = sub.add_parser("mutate", help="[Q.A.] o teste do teste")
+    s.add_argument("--src", nargs="*", default=None)
+    s.add_argument("--restaurar", action="store_true")
+    s.set_defaults(f=cmd_mutate)
+
+    s = sub.add_parser("test", help="west twister")
+    s.add_argument("--board", default="native_sim")
+    s.set_defaults(f=cmd_test)
+
+    s = sub.add_parser("matrix", help="matriz de modularidade")
+    s.add_argument("--board", default="native_sim")
+    s.add_argument("--listar", action="store_true", help="so lista as combinacoes")
+    s.set_defaults(f=cmd_matrix)
+
+    s = sub.add_parser("status", help="onde estamos")
+    s.set_defaults(f=cmd_status)
+
+    a = ap.parse_args()
+    a.f(a)
+
+
+if __name__ == "__main__":
+    main()

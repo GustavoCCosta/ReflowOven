@@ -1,0 +1,183 @@
+name: CI
+
+# Gate objetivo do processo. O Q.A. pode reprovar um PR com CI verde,
+# mas ninguem aprova ou faz merge com CI vermelho.
+#
+# Nenhum agente pode alterar este arquivo (PROCESSO.md, secao 9): quem esta
+# sendo medido nao mexe na regua.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  logica:
+    # Compilacao nativa da logica pura em C99. Roda em segundos e pega a
+    # maior parte dos defeitos de controle (foi assim que RFO-B04 e B05
+    # foram reproduzidos no relatorio inicial de Q.A.).
+    name: Logica pura + host_sim
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar host_sim com -Wall -Wextra -Werror
+        run: |
+          if [ -f tools/host_sim.c ]; then
+            gcc -std=c99 -Wall -Wextra -Werror -O2 -o /tmp/host_sim \
+                tools/host_sim.c -lm
+            /tmp/host_sim || true
+          else
+            echo "tools/host_sim.c ausente — pulando"
+          fi
+
+  ztest:
+    name: ztest (native_sim)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:latest
+      options: --user root
+    env:
+      CMAKE_PREFIX_PATH: /opt/toolchains
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - name: Inicializar workspace west
+        run: |
+          if [ -f app/west.yml ]; then
+            west init -l app
+          else
+            west init --narrow ws
+            mv app ws/app || true
+          fi
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: Twister
+        run: |
+          west twister -T app/tests -p native_sim --inline-logs -v
+
+      - name: Publicar relatorio
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twister-out
+          path: twister-out/
+          retention-days: 14
+
+  modularidade:
+    # O requisito central do projeto e poder ligar e desligar recursos.
+    # Quebrar a build com uma feature desligada e reprovacao automatica.
+    #
+    # Opcoes bool reais do Kconfig da aplicacao (as demais sao int/string e nao
+    # entram na matriz): REFLOW_UI_DISPLAY, REFLOW_UI_INPUT, REFLOW_SHELL,
+    # REFLOW_NET. REFLOW_LINK_WIFI e REFLOW_LINK_USB_ECM formam um `choice`
+    # dentro de `if REFLOW_NET` — sao alternativas, nunca ligadas juntas.
+    name: Matriz de modularidade (native_sim)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:latest
+      options: --user root
+    env:
+      CMAKE_PREFIX_PATH: /opt/toolchains
+    strategy:
+      fail-fast: false
+      matrix:
+        combo:
+          - nome: nucleo-apenas
+            flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=n -DCONFIG_REFLOW_SHELL=n"
+          - nome: sem-shell
+            flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=n"
+          - nome: sem-ui-input
+            flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=n -DCONFIG_REFLOW_SHELL=y"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+      - name: Inicializar workspace west
+        run: |
+          if [ -f app/west.yml ]; then west init -l app; else west init ws; fi
+          west update --narrow -o=--depth=1
+          west zephyr-export
+      - name: Build ${{ matrix.combo.nome }} @ native_sim
+        run: |
+          west build -p always -b native_sim -d build/${{ matrix.combo.nome }} \
+            app -- ${{ matrix.combo.flags }}
+
+  modularidade-boards:
+    # Combinacoes que exigem hardware real (display, encoder, radio, USB) so
+    # compilam para board de verdade. O README diz que essas builds nunca
+    # foram executadas — entao este job comeca INFORMATIVO (continue-on-error)
+    # para nao travar todo merge no dia 1.
+    #
+    # Assim que ficar verde, remova o continue-on-error e adicione-o aos
+    # required checks da protecao de branch. Ate la, o Gerente le o resultado
+    # e abre issue para cada combinacao quebrada.
+    name: Matriz de modularidade (boards)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:latest
+      options: --user root
+    env:
+      CMAKE_PREFIX_PATH: /opt/toolchains
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nome: pico2-completo-usb
+            board: rpi_pico2/rp2350a/m33
+            flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_USB_ECM=y -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
+          - nome: pico2-sem-rede
+            board: rpi_pico2/rp2350a/m33
+            flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
+          - nome: esp32-wifi
+            board: esp32_devkitc/esp32/procpu
+            flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_WIFI=y -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=n -DCONFIG_REFLOW_SHELL=y"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+      - name: Inicializar workspace west
+        run: |
+          if [ -f app/west.yml ]; then west init -l app; else west init ws; fi
+          west update --narrow -o=--depth=1
+          west zephyr-export
+      - name: Build ${{ matrix.nome }} @ ${{ matrix.board }}
+        run: |
+          west build -p always -b ${{ matrix.board }} -d build/${{ matrix.nome }} \
+            app -- ${{ matrix.flags }}
+
+  processo:
+    # Verifica que o PR respeita o contrato antes de gastar tempo de revisao.
+    name: Contrato de PR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: PR referencia exatamente uma issue
+        env:
+          CORPO: ${{ github.event.pull_request.body }}
+        run: |
+          N=$(printf '%s' "$CORPO" | grep -ioE '(closes|fixes|resolves) #[0-9]+' | wc -l)
+          if [ "$N" -ne 1 ]; then
+            echo "::error::PR deve fechar exatamente uma issue (encontrado: $N)."
+            echo "Uma issue por PR — PROCESSO.md secao 5."
+            exit 1
+          fi
+      - name: Nao altera o gate nem o contrato
+        run: |
+          ALVO=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          if echo "$ALVO" | grep -qE '^(\.github/workflows/|\.flow/PROCESSO\.md)'; then
+            echo "::error::Este PR altera o gate de CI ou o contrato de processo."
+            echo "Isso exige a label precisa-humano e revisao do Gustavo."
+            exit 1
+          fi
