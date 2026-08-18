@@ -17,7 +17,7 @@ barra push e API. Não tente — vai falhar e queimar turno. Seu trabalho sai co
 ## Preparação (uma vez por sessão)
 
 ```bash
-mkdir -p ~/.reflow && printf '%s' "SEU_TOKEN_DE_LEITURA" > ~/.reflow-token
+mkdir -p ~/.reflow && printf '%s' "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" > ~/.reflow-token
 chmod 600 ~/.reflow-token
 git clone --depth 1 https://github.com/GustavoCCosta/ReflowOven.git /tmp/kit-src 2>/dev/null || true
 bash .flow/bin/setup_zephyr.sh     # west + toolchain; demora, roda uma vez

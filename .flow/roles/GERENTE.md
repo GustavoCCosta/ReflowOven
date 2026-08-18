@@ -18,7 +18,7 @@ inclusive sobre o que deu errado.
 ## Preparação (uma vez por sessão)
 
 ```bash
-printf '%s' "SEU_TOKEN_DE_LEITURA" > ~/.reflow-token && chmod 600 ~/.reflow-token
+printf '%s' "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" > ~/.reflow-token && chmod 600 ~/.reflow-token
 bash .flow/bin/setup_zephyr.sh
 .flow/bin/flow setup --papel gerente
 ```
