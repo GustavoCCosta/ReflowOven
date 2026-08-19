@@ -17,7 +17,6 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -26,6 +25,7 @@
 
 #include "../core/app.h"
 #include "../telemetry_json.h"
+#include "cmdparse.h"
 #include "index_html.h"
 #include "net.h"
 
@@ -111,47 +111,24 @@ static int send_profiles(int fd)
 	return send_response(fd, "200 OK", "application/json", body, (size_t)n);
 }
 
-/* Extract an unsigned decimal value for "key=" from a query string. */
-static int query_int(const char *query, const char *key, int fallback)
-{
-	const char *p = query != NULL ? strstr(query, key) : NULL;
-
-	if (p == NULL) {
-		return fallback;
-	}
-	p += strlen(key);
-	if (*p != '=') {
-		return fallback;
-	}
-	return atoi(p + 1);
-}
-
 static int handle_cmd(int fd, const char *query)
 {
+	enum reflow_cmd_parse res;
 	struct reflow_cmd cmd;
 
-	if (query == NULL) {
-		return send_response(fd, "400 Bad Request", "text/plain", "", 0);
-	}
-
-	if (strstr(query, "id=start") != NULL) {
-		cmd.id = REFLOW_CMD_START;
-		cmd.arg = 0;
-	} else if (strstr(query, "id=stop") != NULL) {
-		cmd.id = REFLOW_CMD_STOP;
-		cmd.arg = 0;
-	} else if (strstr(query, "id=clear") != NULL) {
-		cmd.id = REFLOW_CMD_CLEAR_FAULT;
-		cmd.arg = 0;
-	} else if (strstr(query, "id=profile") != NULL) {
-		cmd.id = REFLOW_CMD_SELECT_PROFILE;
-		cmd.arg = query_int(query, "arg", 0);
-	} else {
+	res = reflow_cmd_parse(query, &cmd);
+	if (res == REFLOW_CMD_PARSE_REJECT) {
 		return send_response(fd, "400 Bad Request", "text/plain", "", 0);
 	}
 
 	if (reflow_cmd_post(&cmd, K_MSEC(100)) != 0) {
 		return send_response(fd, "503 Service Unavailable", "text/plain", "", 0);
+	}
+
+	if (res == REFLOW_CMD_PARSE_REJECT_STOP) {
+		/* The stop was honoured; the request itself was still malformed. */
+		LOG_WRN("ambiguous /api/cmd request, stopped as a precaution");
+		return send_response(fd, "400 Bad Request", "text/plain", "", 0);
 	}
 	return send_response(fd, "204 No Content", "text/plain", "", 0);
 }

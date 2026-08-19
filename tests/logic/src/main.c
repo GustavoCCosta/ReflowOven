@@ -10,6 +10,7 @@
 
 #include "pid.h"
 #include "profile.h"
+#include "net/cmdparse.h"
 
 /* ------------------------------------------------------------------ PID */
 
@@ -239,3 +240,126 @@ ZTEST(reflow_profile, test_nominal_duration)
 }
 
 ZTEST_SUITE(reflow_profile, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------------- command dispatch */
+
+/*
+ * RFO-B01. The dispatch used to be four unanchored strstr() calls, with
+ * "id=start" tested first: any occurrence of that substring anywhere in the
+ * query started a run, including inside the value of another parameter.
+ */
+
+static enum reflow_cmd_parse parse(const char *query, struct reflow_cmd *cmd)
+{
+	cmd->id = 0xFFU;
+	cmd->arg = -1;
+	return reflow_cmd_parse(query, cmd);
+}
+
+ZTEST(reflow_cmdparse, test_stop_is_not_hijacked_by_another_parameter)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(parse("id=stop&note=id=start", &cmd), REFLOW_CMD_PARSE_OK,
+		      "a well formed stop must be accepted");
+	zassert_equal(cmd.id, REFLOW_CMD_STOP,
+		      "?id=stop&note=id=start started the oven (id=%u)", cmd.id);
+}
+
+ZTEST(reflow_cmdparse, test_key_must_match_whole)
+{
+	struct reflow_cmd cmd;
+
+	/* "myid" is not "id", and "startle" is not "start". */
+	zassert_equal(parse("myid=start", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "a key ending in 'id' must not be taken for 'id'");
+	zassert_equal(parse("id=startle", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "the value must match the command in full");
+	zassert_equal(parse("x=id=start", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "a command hidden in another value must not be executed");
+}
+
+ZTEST(reflow_cmdparse, test_repeated_id_is_rejected)
+{
+	struct reflow_cmd cmd;
+
+	/* Neither first-wins nor last-wins: an ambiguous oven command is an error. */
+	zassert_equal(parse("id=start&id=clear", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "a repeated id must not be resolved, it must be rejected");
+	zassert_equal(parse("id=start&id=start", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "a repeated id is ambiguous even when the values agree");
+
+	/* ... but if a stop was one of the readings, the safe outcome is to stop. */
+	zassert_equal(parse("id=start&id=stop", &cmd), REFLOW_CMD_PARSE_REJECT_STOP,
+		      "stop must win over any other possible reading");
+	zassert_equal(cmd.id, REFLOW_CMD_STOP, "ambiguous stop must still stop");
+}
+
+ZTEST(reflow_cmdparse, test_unknown_command_executes_nothing)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(parse("id=bake", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "unknown command must be rejected");
+	zassert_equal(cmd.id, 0xFFU, "nothing may be written on rejection");
+}
+
+ZTEST(reflow_cmdparse, test_empty_and_missing_query)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(parse(NULL, &cmd), REFLOW_CMD_PARSE_REJECT, "no query");
+	zassert_equal(parse("", &cmd), REFLOW_CMD_PARSE_REJECT, "empty query");
+	zassert_equal(parse("arg=2", &cmd), REFLOW_CMD_PARSE_REJECT, "no id at all");
+}
+
+ZTEST(reflow_cmdparse, test_id_without_a_value)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(parse("id", &cmd), REFLOW_CMD_PARSE_REJECT, "bare 'id'");
+	zassert_equal(parse("id=", &cmd), REFLOW_CMD_PARSE_REJECT, "empty value");
+	zassert_equal(parse("id=&arg=1", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "empty value with another parameter");
+}
+
+ZTEST(reflow_cmdparse, test_percent_encoding_is_decoded)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(parse("id=%73tart", &cmd), REFLOW_CMD_PARSE_OK,
+		      "%%73tart must decode to start");
+	zassert_equal(cmd.id, REFLOW_CMD_START, "decoded start");
+
+	zassert_equal(parse("%69d=st%6Fp", &cmd), REFLOW_CMD_PARSE_OK,
+		      "the key is percent-decoded too");
+	zassert_equal(cmd.id, REFLOW_CMD_STOP, "decoded stop");
+
+	/* A broken escape is a malformed request, not a command. */
+	zassert_equal(parse("id=%zztart", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "invalid hex escape");
+	zassert_equal(parse("id=star%7", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "truncated escape");
+	zassert_equal(parse("id=%00start", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "an embedded NUL must not truncate the value");
+}
+
+ZTEST(reflow_cmdparse, test_profile_argument)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(parse("id=profile&arg=2", &cmd), REFLOW_CMD_PARSE_OK, "profile 2");
+	zassert_equal(cmd.id, REFLOW_CMD_SELECT_PROFILE, "profile command");
+	zassert_equal(cmd.arg, 2, "arg not parsed, got %d", cmd.arg);
+
+	zassert_equal(parse("arg=2&id=profile", &cmd), REFLOW_CMD_PARSE_OK,
+		      "parameter order must not matter");
+	zassert_equal(cmd.arg, 2, "arg not parsed when it comes first");
+
+	zassert_equal(parse("id=profile&arg=2x", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "a non numeric arg is malformed");
+	zassert_equal(parse("id=profile&arg=1&arg=2", &cmd), REFLOW_CMD_PARSE_REJECT,
+		      "a repeated arg is ambiguous");
+}
+
+ZTEST_SUITE(reflow_cmdparse, NULL, NULL, NULL, NULL, NULL);
