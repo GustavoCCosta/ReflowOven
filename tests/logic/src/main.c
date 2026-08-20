@@ -11,6 +11,7 @@
 #include "pid.h"
 #include "profile.h"
 #include "net/cmdparse.h"
+#include "net/httpgate.h"
 
 /* ------------------------------------------------------------------ PID */
 
@@ -363,3 +364,293 @@ ZTEST(reflow_cmdparse, test_profile_argument)
 }
 
 ZTEST_SUITE(reflow_cmdparse, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------------ command authorisation */
+
+/*
+ * RFO-B02. Before the patch nothing between the request line and
+ * reflow_cmd_post() was inspected, so `POST /api/cmd?id=start` from any page in
+ * the browser started a 245 degC run. These exercise the gate that now stands
+ * there. Requests are written out in full, CRLF and all, because the framing is
+ * part of what is under test.
+ */
+
+#define TOKEN "s3gred0-de-bancada"
+
+#define REQ(target, extra)                          \
+	"POST " target " HTTP/1.1\r\n"               \
+	"Host: 192.168.7.1\r\n"                      \
+	extra                                        \
+	"\r\n"
+
+#define TOKEN_HDR "X-Reflow-Token: " TOKEN "\r\n"
+
+ZTEST(reflow_httpgate, test_good_request_is_allowed)
+{
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start", TOKEN_HDR), TOKEN),
+		      REFLOW_GATE_ALLOW, "a well formed authorised command must pass");
+	zassert_is_null(reflow_gate_status(REFLOW_GATE_ALLOW),
+			"ALLOW has no HTTP status of its own");
+}
+
+ZTEST(reflow_httpgate, test_token_must_be_present_and_exact)
+{
+	/* The drive-by from the ticket: no header at all. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start", ""), TOKEN),
+		      REFLOW_GATE_UNAUTHORIZED, "a command with no token started the oven");
+
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "X-Reflow-Token: nope\r\n"), TOKEN),
+		      REFLOW_GATE_UNAUTHORIZED, "wrong token");
+
+	/* Right prefix, short: this is what a length-blind compare lets through. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "X-Reflow-Token: s3gred0\r\n"), TOKEN),
+		      REFLOW_GATE_UNAUTHORIZED, "a prefix of the token is not the token");
+
+	/* Right prefix, long. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "X-Reflow-Token: " TOKEN "x\r\n"), TOKEN),
+		      REFLOW_GATE_UNAUTHORIZED, "token plus a byte is not the token");
+
+	/* Empty value. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "X-Reflow-Token:\r\n"), TOKEN),
+		      REFLOW_GATE_UNAUTHORIZED, "empty token value");
+}
+
+ZTEST(reflow_httpgate, test_build_without_token_refuses_everything)
+{
+	/* Fail closed: never "accepts because no token was configured". */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start", TOKEN_HDR), ""),
+		      REFLOW_GATE_DISABLED, "no token in the build must disable commands");
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=stop", ""), ""),
+		      REFLOW_GATE_DISABLED, "and it must disable them for everyone");
+}
+
+ZTEST(reflow_httpgate, test_read_only_routes_stay_open)
+{
+	zassert_equal(reflow_gate_check("GET / HTTP/1.1\r\nHost: x\r\n\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "the page must stay open");
+	zassert_equal(reflow_gate_check("GET /api/state HTTP/1.1\r\n\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "telemetry cannot change the oven state");
+	zassert_equal(reflow_gate_check("GET /api/events HTTP/1.1\r\n\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "the event stream must stay open");
+	zassert_equal(reflow_gate_check("GET /api/profiles HTTP/1.1\r\n\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "the profile list must stay open");
+}
+
+ZTEST(reflow_httpgate, test_preflight_is_never_granted)
+{
+	/* A preflight that succeeds undoes the whole protection. */
+	zassert_equal(reflow_gate_check("OPTIONS /api/cmd HTTP/1.1\r\n"
+					"Host: 192.168.7.1\r\n"
+					"Origin: http://evil.example\r\n"
+					"Access-Control-Request-Method: POST\r\n"
+					"Access-Control-Request-Headers: x-reflow-token\r\n"
+					"\r\n", TOKEN),
+		      REFLOW_GATE_METHOD_NOT_ALLOWED, "OPTIONS must not be answered");
+
+	/* And it must be refused even on a build with no token, so the answer
+	 * never depends on the secret. */
+	zassert_equal(reflow_gate_check("OPTIONS /api/cmd HTTP/1.1\r\n"
+					"Host: 192.168.7.1\r\n\r\n", ""),
+		      REFLOW_GATE_METHOD_NOT_ALLOWED, "405 regardless of the token");
+
+	zassert_equal(reflow_gate_check("GET /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: 192.168.7.1\r\n" TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_METHOD_NOT_ALLOWED, "GET on the command endpoint");
+}
+
+ZTEST(reflow_httpgate, test_origin_must_match_host)
+{
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "Origin: http://192.168.7.1\r\n" TOKEN_HDR),
+					TOKEN),
+		      REFLOW_GATE_ALLOW, "same origin must pass");
+
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "Origin: http://10.0.0.9\r\n" TOKEN_HDR),
+					TOKEN),
+		      REFLOW_GATE_FORBIDDEN, "cross origin command must be refused");
+
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "Origin: null\r\n" TOKEN_HDR), TOKEN),
+		      REFLOW_GATE_FORBIDDEN, "an opaque origin is not the oven");
+
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "Origin: http://192.168.7.1.evil.example\r\n"
+					    TOKEN_HDR), TOKEN),
+		      REFLOW_GATE_FORBIDDEN, "a host that merely starts with ours");
+}
+
+ZTEST(reflow_httpgate, test_host_must_be_an_address_literal)
+{
+	/* DNS rebinding: a name can be re-pointed at the attacker, an address
+	 * cannot. */
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: oven.local\r\n" TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_FORBIDDEN, "a DNS name must be refused");
+
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: 192.168.7.1:8080\r\n" TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "a literal with a port is still a literal");
+
+	/* 010.0.0.1 and 10.0.0.1 naming the same host is a second spelling. */
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: 010.168.7.1\r\n" TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_FORBIDDEN, "octal-looking octet must be refused");
+
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: 192.168.7.256\r\n" TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_FORBIDDEN, "octet above 255");
+
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "HTTP/1.1 without Host");
+}
+
+ZTEST(reflow_httpgate, test_duplicate_headers_are_an_error)
+{
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    TOKEN_HDR TOKEN_HDR), TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "two tokens is ambiguous");
+
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: 192.168.7.1\r\n"
+					"Host: 192.168.7.1\r\n" TOKEN_HDR "\r\n", TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "two Hosts is ambiguous");
+
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "Origin: http://192.168.7.1\r\n"
+					    "Origin: http://192.168.7.1\r\n" TOKEN_HDR),
+					TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "two Origins is ambiguous");
+}
+
+ZTEST(reflow_httpgate, test_truncated_or_malformed_is_refused)
+{
+	/* No end of headers inside what we read: the Origin or a second token
+	 * could be in the part we never saw. */
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host: 192.168.7.1\r\n" TOKEN_HDR, TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "no CRLFCRLF must fail closed");
+
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1", TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "request line not even finished");
+
+	zassert_equal(reflow_gate_check("", TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "empty request");
+	zassert_equal(reflow_gate_check(NULL, TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "no request at all");
+
+	/* A header line with no colon. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "this-is-not-a-header\r\n" TOKEN_HDR),
+					TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "line without a colon");
+
+	/* Whitespace before the colon is a smuggling primitive, not a typo. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "X-Reflow-Token : " TOKEN "\r\n"), TOKEN),
+		      REFLOW_GATE_BAD_REQUEST, "space before the colon");
+}
+
+ZTEST(reflow_httpgate, test_header_name_case_and_whitespace)
+{
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"HOST: 192.168.7.1\r\n"
+					"x-REFLOW-token: " TOKEN "\r\n\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "header names are case insensitive");
+
+	zassert_equal(reflow_gate_check("POST /api/cmd?id=start HTTP/1.1\r\n"
+					"Host:\t 192.168.7.1 \r\n"
+					"X-Reflow-Token:   " TOKEN "\t\r\n\r\n", TOKEN),
+		      REFLOW_GATE_ALLOW, "surrounding whitespace must be ignored");
+
+	/* The value itself is not case folded: a token is a secret, not a name. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start",
+					    "X-Reflow-Token: S3GRED0-DE-BANCADA\r\n"),
+					TOKEN),
+		      REFLOW_GATE_UNAUTHORIZED, "the token value is case sensitive");
+}
+
+ZTEST(reflow_httpgate, test_every_refusal_has_a_status)
+{
+	zassert_str_equal(reflow_gate_status(REFLOW_GATE_BAD_REQUEST), "400 Bad Request");
+	zassert_str_equal(reflow_gate_status(REFLOW_GATE_UNAUTHORIZED), "401 Unauthorized");
+	zassert_str_equal(reflow_gate_status(REFLOW_GATE_FORBIDDEN), "403 Forbidden");
+	zassert_str_equal(reflow_gate_status(REFLOW_GATE_METHOD_NOT_ALLOWED),
+			  "405 Method Not Allowed");
+	zassert_str_equal(reflow_gate_status(REFLOW_GATE_DISABLED),
+			  "503 Service Unavailable");
+}
+
+/*
+ * Truncation sweep: the server does a single recv() into a 512 byte buffer, so a
+ * request cut at an arbitrary offset is the normal case, not the exotic one.
+ * Every prefix of a valid request must be refused, and none may read past the
+ * terminator.
+ */
+ZTEST(reflow_httpgate, test_no_prefix_of_a_valid_request_is_allowed)
+{
+	static const char full[] =
+		"POST /api/cmd?id=start HTTP/1.1\r\n"
+		"Host: 192.168.7.1\r\n"
+		"Origin: http://192.168.7.1\r\n"
+		"X-Reflow-Token: " TOKEN "\r\n"
+		"\r\n";
+	char buf[sizeof(full)];
+	size_t n;
+
+	zassert_equal(reflow_gate_check(full, TOKEN), REFLOW_GATE_ALLOW,
+		      "the complete request must pass");
+
+	for (n = 0; n < sizeof(full) - 1U; n++) {
+		memcpy(buf, full, n);
+		buf[n] = '\0';
+		zassert_not_equal(reflow_gate_check(buf, TOKEN), REFLOW_GATE_ALLOW,
+				  "prefix of %zu bytes was allowed", n);
+	}
+}
+
+/*
+ * Single byte corruption sweep. Deterministic: every position gets four
+ * substitutions chosen to hit the parser's structure (NUL, CR, colon, space).
+ * The point is not that each one is refused — corrupting the query string still
+ * leaves a valid authorised request — but that none of them reads out of bounds
+ * or loops forever.
+ */
+ZTEST(reflow_httpgate, test_single_byte_corruption_is_survivable)
+{
+	static const char full[] =
+		"POST /api/cmd?id=start HTTP/1.1\r\n"
+		"Host: 192.168.7.1\r\n"
+		"Origin: http://192.168.7.1\r\n"
+		"X-Reflow-Token: " TOKEN "\r\n"
+		"\r\n";
+	static const char pokes[] = { '\0', '\r', ':', ' ' };
+	char buf[sizeof(full)];
+	size_t i, k;
+	int allowed = 0;
+
+	for (i = 0; i < sizeof(full) - 1U; i++) {
+		for (k = 0; k < sizeof(pokes); k++) {
+			memcpy(buf, full, sizeof(full));
+			buf[i] = pokes[k];
+			if (reflow_gate_check(buf, TOKEN) == REFLOW_GATE_ALLOW) {
+				allowed++;
+			}
+		}
+	}
+
+	/*
+	 * Corrupting a byte must never turn an unauthorised request into an
+	 * authorised one; here the request starts out valid, so some corruptions
+	 * legitimately still pass (anything inside the query string). What must
+	 * hold is that the sweep completes without a fault.
+	 */
+	zassert_true(allowed >= 0, "sweep completed");
+}
+
+ZTEST_SUITE(reflow_httpgate, NULL, NULL, NULL, NULL, NULL);

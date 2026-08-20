@@ -220,6 +220,26 @@ config REFLOW_USB_PRODUCT
 
 endif # REFLOW_LINK_USB_ECM
 
+config REFLOW_NET_TOKEN
+	string "Shared secret required to command the oven over HTTP"
+	default ""
+	help
+	  Sent by the web UI in the X-Reflow-Token header of POST /api/cmd, and
+	  compared byte for byte before any command reaches the control core.
+
+	  Deliberately inside `if REFLOW_NET`, and deliberately empty by default:
+	  an EMPTY TOKEN DISABLES REMOTE COMMANDS ENTIRELY (the endpoint answers
+	  503). A build that accepted anonymous commands because nobody set a
+	  token would be the RFO-B02 defect with a friendlier face.
+
+	  Not a substitute for a network you trust: the link is plain HTTP, so
+	  anyone able to capture the traffic can replay the token. It closes the
+	  drive-by-from-the-browser and the anyone-on-the-LAN cases, not the
+	  wiretap one.
+
+	  Do NOT put it in the served page. The UI asks the operator for it and
+	  keeps it in memory only.
+
 config REFLOW_NET_HTTP_PORT
 	int "HTTP port"
 	default 80

@@ -10,6 +10,8 @@ h1{font-size:18px;margin:0 0 12px}
 #temp{font-size:44px;font-weight:600;line-height:1}
 #sub{color:#aaa;margin:4px 0 12px}
 button,select{font:inherit;padding:8px 14px;margin:0 6px 6px 0;border:0;border-radius:6px;background:#2b6;color:#031;cursor:pointer}
+input{font:inherit;padding:8px 10px;margin:0 6px 6px 0;border:0;border-radius:6px;background:#222;color:#eee;width:9em}
+#hint{color:#777;font-size:12px;margin:0 0 8px}
 button.stop{background:#c53;color:#fff}
 button.warn{background:#666;color:#fff}
 canvas{width:100%;height:220px;background:#000;border-radius:6px;margin-top:12px}
@@ -24,12 +26,14 @@ td.v{color:#eee;text-align:right}
 <div id='temp'>--.- &deg;C</div>
 <div id='sub'>connecting...</div>
 <div>
+<input id='tok' type='password' placeholder='Token' autocomplete='off'>
 <select id='prof'></select>
 <button onclick='cmd("start")'>Start</button>
 <button class='stop' onclick='cmd("stop")'>Stop</button>
 <button class='warn' onclick='cmd("clear")'>Clear fault</button>
 <button id='usb' class='warn' style='display:none' onclick='usbConnect()'>Conectar por USB</button>
 </div>
+<div id='hint'>O token fica so nesta aba, em memoria: nao e salvo nem enviado na pagina.</div>
 <canvas id='c' width='640' height='220'></canvas>
 <table>
 <tr><td>setpoint</td><td class='v' id='sp'>-</td></tr>
@@ -39,7 +43,18 @@ td.v{color:#eee;text-align:right}
 </table>
 <script>
 var hist=[],MAXP=600,profs=[],lastProf=-1;
-var cmd=function(id){var q='/api/cmd?id='+id;if(id=='profile')q+='&arg='+document.getElementById('prof').value;fetch(q,{method:'POST'});};
+/* O token vai num cabecalho proprio, nunca na query string (que vai para log)
+   nem em cookie (que o navegador manda sozinho e reabre o CSRF). O cabecalho
+   custom tambem forca preflight CORS, que o forno recusa - e e isso que impede
+   uma pagina de outra origem de mandar comando. */
+var cmd=function(id){var q='/api/cmd?id='+id;if(id=='profile')q+='&arg='+document.getElementById('prof').value;
+ fetch(q,{method:'POST',headers:{'X-Reflow-Token':document.getElementById('tok').value}}).then(function(r){
+  if(r.status==401)say('token recusado: confira o campo Token');
+  else if(r.status==403)say('recusado: abra esta pagina pelo IP do forno');
+  else if(r.status==503)say('controle remoto desligado: build sem CONFIG_REFLOW_NET_TOKEN');
+  else if(r.status==400)say('requisicao malformada, comando nao executado');
+  else if(!r.ok)say('comando recusado ('+r.status+')');
+ }).catch(function(){say('sem resposta do forno');});};
 document.getElementById('prof').onchange=function(){cmd('profile');};
 function fmt(t){var s=Math.floor(t/1000),m=Math.floor(s/60);return m+':'+('0'+(s%60)).slice(-2);}
 function draw(){

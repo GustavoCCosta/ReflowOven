@@ -26,6 +26,7 @@
 #include "../core/app.h"
 #include "../telemetry_json.h"
 #include "cmdparse.h"
+#include "httpgate.h"
 #include "index_html.h"
 #include "net.h"
 
@@ -78,6 +79,12 @@ static int send_all(int fd, const char *data, size_t len)
 	return 0;
 }
 
+/*
+ * Every response the server ever sends goes through here, and it emits NO
+ * Access-Control-Allow-Origin. That absence is load bearing: with it, a page on
+ * another origin could read the answer to a command it managed to send. Do not
+ * add a CORS header here "for convenience" without reopening RFO-B02.
+ */
 static int send_response(int fd, const char *status, const char *ctype,
 			 const char *body, size_t body_len)
 {
@@ -164,6 +171,7 @@ static bool serve(struct client *cl)
 {
 	char buf[REQ_BUF_SZ];
 	char *method, *target, *query, *sp;
+	enum reflow_gate gate;
 	ssize_t got;
 
 	got = zsock_recv(cl->fd, buf, sizeof(buf) - 1, 0);
@@ -171,6 +179,14 @@ static bool serve(struct client *cl)
 		return false;
 	}
 	buf[got] = '\0';
+
+	/*
+	 * The authorisation gate has to see the request exactly as it arrived:
+	 * the parsing below writes NUL bytes into the request line and would hide
+	 * the header block from it. It answers ALLOW for everything that is not a
+	 * command, so one call before the routing covers every route.
+	 */
+	gate = reflow_gate_check(buf, CONFIG_REFLOW_NET_TOKEN);
 
 	method = buf;
 	sp = strchr(buf, ' ');
@@ -190,6 +206,19 @@ static bool serve(struct client *cl)
 	}
 
 	LOG_DBG("%s %s", method, target);
+
+	if (gate != REFLOW_GATE_ALLOW) {
+		/*
+		 * Only /api/cmd can land here, and nothing was posted to the
+		 * control core. Logged at warning level because an oven refusing
+		 * a command is something the operator has to be able to find.
+		 */
+		LOG_WRN("%s %s refused: %s", method, target,
+			reflow_gate_status(gate));
+		(void)send_response(cl->fd, reflow_gate_status(gate),
+				    "text/plain", "", 0);
+		return false;
+	}
 
 	if (strcmp(method, "GET") == 0) {
 		if (strcmp(target, "/") == 0 || strcmp(target, "/index.html") == 0) {
@@ -285,6 +314,11 @@ static void httpd_thread(void *a, void *b, void *c)
 	srv = listen_socket();
 	if (srv < 0) {
 		return;
+	}
+
+	if (CONFIG_REFLOW_NET_TOKEN[0] == '\0') {
+		LOG_WRN("no CONFIG_REFLOW_NET_TOKEN: remote commands are DISABLED "
+			"(POST /api/cmd answers 503). Telemetry is still served.");
 	}
 
 	last_push = k_uptime_get();
