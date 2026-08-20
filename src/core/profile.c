@@ -43,6 +43,19 @@ static const struct reflow_profile builtin[] = {
 		.tol_mc = 3000,
 		.grace_ms = 120000,
 	},
+	{
+		.name = "Bake / Dry 200C",
+		.n_stages = 4,
+		.stages = {
+			{ "preheat", 150000,  200000, REFLOW_STAGE_RAMP },
+			{ "ramp",  200000,  400000, REFLOW_STAGE_RAMP },
+			{ "hold",  200000, 3000000, REFLOW_STAGE_SOAK },
+			{ "cool",     50000, 180000, REFLOW_STAGE_COOL },
+		},
+		.abort_mc = 250000,
+		.tol_mc = 3000,
+		.grace_ms = 120000,
+	},
 };
 
 uint8_t reflow_profile_count(void)
