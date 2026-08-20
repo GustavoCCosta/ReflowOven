@@ -250,19 +250,81 @@ def cmd_mainpatch(a):
 
 # ------------------------------------------------------------------ mutate
 
+def dirs_na_arvore(candidatos, ref: str) -> list:
+    """Quais dos diretorios existem na ARVORE DE <ref>, nao no disco.
+
+    Testar no disco (`(DIR_PADRAO / d).exists()`) da a resposta errada nos dois
+    extremos: um diretorio que so o PR criou existe no disco mas nao na BASE, e um
+    que a mutacao acabou de esvaziar nao existe no disco mas existe em HEAD.
+    """
+    return [d for d in candidatos
+            if git("cat-file", "-e", f"{ref}:{d}", check=False).returncode == 0]
+
+
+def nomes_z(p) -> list:
+    """Separa a saida de um `git ... -z --name-only` em caminhos de verdade."""
+    return [n for n in p.stdout.split("\0") if n]
+
+
+def arquivos_adicionados(base: str, head: str, dirs: list) -> list:
+    """Arquivos que <head> tem e <base> nao — exatamente o que o checkout NAO apaga.
+
+    `git checkout <ref> -- <path>` sobrescreve so o que existe em <ref>; arquivo
+    novo do PR sobrevive intacto. Este e o RFO-G03.
+
+    O `-z` nao e detalhe de estilo: sem ele o git aplica `core.quotepath` (ligado
+    por padrao) e devolve a REPRESENTACAO do caminho, entre aspas e com escapes
+    octais, para qualquer byte fora do ASCII. `configuracao.c` com cedilha volta
+    como "src/net/configura\\303\\247\\303\\243o.c", o unlink nao acha nada, e a
+    mutacao mente dizendo que apagou. Com `-z` os nomes vem crus, separados por
+    NUL — o que fecha de uma vez acento, espaco, aspas, barra invertida e quebra
+    de linha no nome.
+    """
+    if not dirs:
+        return []
+    return nomes_z(git("diff", "-z", "--diff-filter=A", "--name-only",
+                       base, head, "--", *dirs))
+
+
 def cmd_mutate(a):
     """Reverte SO o codigo-fonte para o estado da BASE, mantendo os testes do PR.
 
     Se a suite continuar verde, o teste novo nao prova nada -> reprovar.
+
+    Como conferir que a mutacao mordeu de fato, depois de rodar:
+        git status --porcelain          # tem que listar M e D no codigo-fonte
+        git diff --stat flow-base       # tem que sair VAZIO (fonte == BASE)
     """
     exige_repo()
-    src = [d for d in (a.src or SRC_DIRS_DEFAULT) if (DIR_PADRAO / d).exists()]
-    if not src:
-        die("nenhum diretorio de codigo-fonte encontrado; passe --src")
+    candidatos = a.src or SRC_DIRS_DEFAULT
+
     if a.restaurar:
-        git("checkout", "HEAD", "--", *src)
+        # Filtrar por HEAD, nao pelo disco: diretorio que a mutacao esvaziou
+        # precisa ser restaurado, e no disco ele pode nem existir mais.
+        dirs = dirs_na_arvore(candidatos, "HEAD")
+        if not dirs:
+            die("nenhum diretorio de codigo-fonte em HEAD; passe --src")
+        # A mutacao pode ter ressuscitado arquivo num diretorio que so a BASE
+        # tem; o pathspec da limpeza precisa alcanca-lo.
+        alvos = list(dirs)
+        if git("rev-parse", "--verify", BR_BASE, check=False).returncode == 0:
+            for d in dirs_na_arvore(candidatos, BR_BASE):
+                if d not in alvos:
+                    alvos.append(d)
+        git("checkout", "HEAD", "--", *dirs)
+        # Simetrico do passo 2 da mutacao: arquivo que a BASE tem e o PR apagou
+        # foi RESSUSCITADO pela mutacao, e `git checkout HEAD -- <dir>` nao o
+        # remove — o pathspec nao casa nada em HEAD. Tire-o do indice e do disco.
+        p = git("diff", "--cached", "-z", "--diff-filter=A", "--name-only", "HEAD",
+                "--", *alvos)
+        for rel in nomes_z(p):
+            git("rm", "--quiet", "-f", "--", rel)
+        sujo = git("status", "--porcelain", "--", *alvos).stdout.strip()
+        if sujo:
+            die("restauracao incompleta; sobrou:\n" + sujo)
         print("codigo-fonte restaurado ao estado do PR.")
         return
+
     # Sem commit, HEAD == BASE e o `--restaurar` apagaria o trabalho em vez de
     # devolve-lo. Exigir arvore limpa e o que impede essa perda.
     if git("status", "--porcelain").stdout.strip():
@@ -270,9 +332,52 @@ def cmd_mutate(a):
             "de mutar — senao `flow mutate --restaurar` perderia esse trabalho.")
     if git("rev-parse", "HEAD").stdout == git("rev-parse", BR_BASE).stdout:
         die("HEAD e igual a BASE: nao ha patch para mutar. aplique o PR primeiro.")
-    git("checkout", BR_BASE, "--", *src)
-    print(f"{C['yel']}MUTACAO ATIVA{C['r']} — {', '.join(src)} voltaram ao estado da "
-          f"BASE; testes do PR mantidos.")
+
+    dirs_head = dirs_na_arvore(candidatos, "HEAD")
+    if not dirs_head:
+        die("nenhum diretorio de codigo-fonte encontrado; passe --src")
+    dirs_base = dirs_na_arvore(candidatos, BR_BASE)
+
+    # 1. Reverter o que a BASE tem (isto tambem RESSUSCITA o que o PR apagou).
+    if dirs_base:
+        git("checkout", BR_BASE, "--", *dirs_base)
+
+    # 2. Apagar o que so o PR tem. Restrito aos diretorios de codigo-fonte: o
+    #    pathspec do `git diff` acima e a unica coisa que decide o que morre, e
+    #    `tests/` nunca esta em SRC_DIRS_DEFAULT. Preferido a `git clean -fd`,
+    #    que apagaria tambem arquivo nao rastreado que nao veio do PR.
+    novos = arquivos_adicionados(BR_BASE, "HEAD", dirs_head)
+    for rel in novos:
+        alvo = DIR_PADRAO / rel
+        # Sem `missing_ok`: este caminho veio de `--diff-filter=A`, entao ele
+        # EXISTE. Se nao existir, a lista esta errada e a mutacao nao aconteceu —
+        # exatamente o modo de falha que deixou o RFO-G03 aberto por mais uma
+        # volta. Melhor parar do que anunciar uma remocao que nao ocorreu.
+        if not alvo.exists():
+            die(f"ia apagar {rel}, mas ele nao esta no disco.\n"
+                "a lista de arquivos novos veio errada: nao confie nesta mutacao.")
+        alvo.unlink()
+
+    # O `resto` fecha o cerco: se por qualquer motivo o codigo-fonte nao ficou
+    # identico a BASE, a mutacao nao entregou o que promete e um `flow test` verde
+    # depois dela nao quer dizer nada. Morre, com a mesma severidade que o
+    # `--restaurar` — a direcao que decide aprovacao nao pode ser a mais frouxa.
+    alvos = list(dirs_head)
+    for d in dirs_base:
+        if d not in alvos:
+            alvos.append(d)
+    resto = git("diff", "--stat", BR_BASE, "--", *alvos).stdout.strip()
+
+    print(f"{C['yel']}MUTACAO ATIVA{C['r']} — {', '.join(dirs_head)} voltaram ao "
+          f"estado da BASE; testes do PR mantidos.")
+    if novos:
+        print(f"{C['dim']}apagados (nao existem na BASE): "
+              f"{', '.join(novos)}{C['r']}")
+    if resto:
+        die("mutacao incompleta: o codigo-fonte ainda difere da BASE.\n"
+            f"{resto}\n"
+            "nao rode `flow test` sobre isto — o resultado nao prova nada.\n"
+            "rode `flow mutate --restaurar` e relate.")
     print(f"\nrode agora:  flow test")
     print(f"{C['b']}esperado: o teste novo FALHA.{C['r']} se passar, o teste e verde "
           f"falso -> reprove o PR.")
