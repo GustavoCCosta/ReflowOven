@@ -1,0 +1,123 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * SIMULATION AND BUILD TEST ONLY. Nothing in this file describes hardware:
+ * every pin number below is a slot in the native_sim GPIO emulator, there is no
+ * SSR on the other end and no thermocouple on the SPI bus. Never copy a number
+ * from here into a board overlay, and never treat a green build here as
+ * evidence that a real oven is wired correctly.
+ *
+ * What it is for: giving `native_sim` the devicetree nodes that the firmware
+ * requires at compile time, so that the modularity matrix
+ * (`.flow/bin/flow matrix`, and the `modularidade` job of the CI) can build
+ * every combination of CONFIG_REFLOW_* on a host with no hardware attached.
+ * Without it heater.c:16 and temp.c:16 stop the build with #error, because the
+ * aliases 'reflow-ssr' and 'reflow-thermocouple' exist only in the Pico and
+ * ESP32 overlays.
+ *
+ * Nodes provided, and who needs each one:
+ *
+ *   ssr0        gpio-leds on the GPIO emulator   heater.c  (alias reflow-ssr)
+ *   max6675     on the SPI emulator              temp.c    (alias reflow-thermocouple)
+ *   btn0        gpio-keys                        CONFIG_REFLOW_UI_INPUT
+ *   encoder     gpio-qdec                        CONFIG_REFLOW_UI_INPUT
+ *   cdc_ecm0    on the native udc                CONFIG_REFLOW_LINK_USB_ECM
+ *
+ * The display is not declared here: native_sim already chooses its SDL panel
+ * (zephyr,display = &sdl_dc), and CONFIG_REFLOW_UI_DISPLAY uses the chosen node.
+ *
+ * At runtime the emulated bus has no MAX6675 behind it, so reflow_temp_init()
+ * fails, the controller latches FAULT_SENSOR and the oven refuses to start.
+ * That is the correct outcome for a simulated build and it is why this overlay
+ * proves nothing about behaviour — only that the code compiles and links.
+ */
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	reflow_outputs {
+		compatible = "gpio-leds";
+
+		ssr0: ssr_0 {
+			gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+			label = "SSR heater (emulated)";
+		};
+	};
+
+	reflow_buttons {
+		compatible = "gpio-keys";
+
+		btn0: button_0 {
+			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Encoder push (emulated)";
+			zephyr,code = <INPUT_KEY_ENTER>;
+		};
+	};
+
+	encoder: encoder {
+		compatible = "gpio-qdec";
+		gpios = <&gpio0 10 GPIO_PULL_UP>, <&gpio0 11 GPIO_PULL_UP>;
+		steps-per-period = <4>;
+		zephyr,axis = <INPUT_REL_WHEEL>;
+		sample-time-us = <2000>;
+		idle-timeout-ms = <200>;
+		status = "okay";
+	};
+
+	aliases {
+		reflow-ssr = &ssr0;
+		reflow-thermocouple = &max6675;
+	};
+};
+
+/* spi0 is the emulated controller that native_sim declares. */
+&spi0 {
+	status = "okay";
+	cs-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
+
+	max6675: max6675@0 {
+		compatible = "maxim,max6675";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+		status = "okay";
+	};
+};
+
+/*
+ * USB, needed only by CONFIG_REFLOW_LINK_USB_ECM.
+ *
+ * native_sim ships zephyr_udc0 as a "zephyr,native-posix-udc" node, which is a
+ * driver for the LEGACY USB device stack. usb_net.c uses USBD, the new stack
+ * (CONFIG_USB_DEVICE_STACK_NEXT), and that one only knows UDC drivers — so the
+ * node compiles and then fails to link:
+ *
+ *   undefined reference to `__device_dts_ord_50'   (50 = udc0)
+ *
+ * The fix is the same one the Zephyr USB tests use for this board: drop the
+ * legacy node and rebuild the zephyr_udc0 label on a virtual UDC under a
+ * virtual host controller. usb_net.c reaches it by
+ * DEVICE_DT_GET(DT_NODELABEL(zephyr_udc0)), so the label has to be this one.
+ *
+ * The MAC addresses come from the IANA documentation range, like the Pico
+ * overlay. In builds without the USB link the whole subtree is unused.
+ */
+/delete-node/ &zephyr_udc0;
+
+/ {
+	zephyr_uhc0: uhc_vrt0 {
+		compatible = "zephyr,uhc-virtual";
+
+		zephyr_udc0: udc_vrt0 {
+			compatible = "zephyr,udc-virtual";
+			num-bidir-endpoints = <8>;
+			maximum-speed = "high-speed";
+
+			cdc_ecm0: cdc_ecm0 {
+				compatible = "zephyr,cdc-ecm-ethernet";
+				remote-mac-address = "00005E0053F1";
+				local-mac-address = [00 00 5E 00 53 F0];
+				status = "okay";
+			};
+		};
+	};
+};

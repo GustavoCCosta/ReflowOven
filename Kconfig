@@ -154,6 +154,13 @@ choice REFLOW_LINK
 config REFLOW_LINK_WIFI
 	bool "Wi-Fi station"
 	select WIFI
+	# wifi.c calls net_mgmt(NET_REQUEST_WIFI_CONNECT). The request handler
+	# lives in the Wi-Fi L2 management layer, and WIFI alone does not bring
+	# it in: each vendor driver selects it. On a target with no Wi-Fi driver
+	# (native_sim, the modularity matrix) the link then fails with
+	# 'undefined reference to net_mgmt_NET_REQUEST_WIFI_CONNECT'. The
+	# feature uses the API, so the feature declares it.
+	select NET_L2_WIFI_MGMT
 	help
 	  Joins an existing network. Needs a radio: fine on ESP32, not
 	  available on a bare RP2350.
