@@ -688,8 +688,9 @@ ZTEST(reflow_tempguard, test_persistent_step_is_eventually_accepted)
 	}
 
 	zassert_equal(reflow_spike_filter(&s, 25000, &out), REFLOW_SPIKE_FORCED,
-		      "after %d consecutive rejections the sensor must be believed",
-		      REFLOW_SPIKE_MAX_REJECTS);
+		      "the %dth consecutive jumping sample must be believed, i.e. after "
+		      "%d suppressed ones",
+		      REFLOW_SPIKE_MAX_REJECTS, REFLOW_SPIKE_MAX_REJECTS - 1);
 	zassert_equal(out, 25000, "the new value must be reported, not suppressed");
 
 	/* And it stays believed: no oscillation back to the stale value. */
@@ -711,19 +712,57 @@ ZTEST(reflow_tempguard, test_real_ramp_is_tracked_with_bounded_lag)
 	struct reflow_spike s;
 	int32_t out = 0;
 	int32_t raw;
+	int run = 0;
 
 	reflow_spike_reset(&s);
 	(void)reflow_spike_filter(&s, 25000, &out);
 
+	/*
+	 * The invariant is a bound on how many samples in a row may be
+	 * suppressed, not on the temperature error: the error depends on how
+	 * fast the oven happens to move, the suppression window does not.
+	 */
 	for (raw = 75000; raw <= 325000; raw += 50000) {
-		(void)reflow_spike_filter(&s, raw, &out);
-		zassert_true(raw - out <= REFLOW_SPIKE_MAX_STEP_MC * REFLOW_SPIKE_MAX_REJECTS,
-			     "reported %d mC while the oven is at %d mC", out, raw);
+		if (reflow_spike_filter(&s, raw, &out) == REFLOW_SPIKE_REJECT) {
+			run++;
+			zassert_true(run <= REFLOW_SPIKE_MAX_REJECTS - 1,
+				     "%d samples suppressed in a row at %d mC; the bound is %d",
+				     run, raw, REFLOW_SPIKE_MAX_REJECTS - 1);
+			zassert_equal(out, s.last_mc,
+				      "a suppressed sample must report the last believed value");
+		} else {
+			run = 0;
+			zassert_equal(out, raw, "an accepted sample must be reported as read");
+		}
 	}
 
+	zassert_equal(run, 0, "the ramp must not end inside a suppression window");
 	zassert_true(out >= LIMIT_MC,
 		     "a runaway ramp must be visible to the controller, reported %d mC",
 		     out);
+}
+
+/*
+ * The complement of the ramp above: a step exactly at the threshold is legal,
+ * so a fast-but-plausible rise must never be suppressed at all. Without this,
+ * raising REFLOW_SPIKE_MAX_STEP_MC would look free.
+ */
+ZTEST(reflow_tempguard, test_steep_but_legal_steps_are_never_suppressed)
+{
+	struct reflow_spike s;
+	int32_t out = 0;
+	int32_t raw;
+
+	reflow_spike_reset(&s);
+	(void)reflow_spike_filter(&s, 25000, &out);
+
+	for (raw = 25000 + REFLOW_SPIKE_MAX_STEP_MC; raw <= 385000;
+	     raw += REFLOW_SPIKE_MAX_STEP_MC) {
+		zassert_equal(reflow_spike_filter(&s, raw, &out), REFLOW_SPIKE_ACCEPT,
+			      "a step of exactly %d mC is inside the window, not a spike",
+			      REFLOW_SPIKE_MAX_STEP_MC);
+		zassert_equal(out, raw, "no lag is allowed on a legal step");
+	}
 }
 
 /*

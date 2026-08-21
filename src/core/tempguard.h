@@ -24,11 +24,17 @@
 #define REFLOW_SPIKE_MAX_STEP_MC 40000
 
 /*
- * How many consecutive samples the filter may suppress before it has to give
- * up and believe the sensor. The filter must never be able to hold the
- * reported temperature still indefinitely: a real step larger than
+ * Which consecutive jumping sample the filter has to believe. With the value
+ * below, samples 1 and 2 of a run are suppressed and sample 3 is accepted, so
+ * the filter can hold the reported temperature still for at most
+ * REFLOW_SPIKE_MAX_REJECTS - 1 samples — two, or 500 ms at the default sample
+ * period. That bound is the whole point: a real step larger than
  * REFLOW_SPIKE_MAX_STEP_MC is indistinguishable from noise on one sample, but
- * not on three.
+ * not on three, and the filter must never be able to suppress one for ever.
+ *
+ * Read it as "the Nth jump is believed", not as "N samples are suppressed":
+ * those differ by one, and the difference is a whole sample period of the
+ * controller trusting a stale reading.
  */
 #define REFLOW_SPIKE_MAX_REJECTS 3
 
@@ -44,8 +50,9 @@ enum reflow_spike_result {
 	/* The sample looked like a spike; the previous value is reported. */
 	REFLOW_SPIKE_REJECT,
 	/*
-	 * The jump persisted for REFLOW_SPIKE_MAX_REJECTS samples, so it is
-	 * not noise. The new value is accepted and reported.
+	 * This is the REFLOW_SPIKE_MAX_REJECTS'th consecutive jumping sample,
+	 * so the jump is not noise. The new value is accepted and reported,
+	 * after REFLOW_SPIKE_MAX_REJECTS - 1 suppressed samples.
 	 */
 	REFLOW_SPIKE_FORCED,
 };

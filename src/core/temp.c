@@ -95,8 +95,8 @@ int reflow_temp_read(int32_t *temp_mc, int32_t *raw_mc)
 		LOG_WRN("spike rejected: %d -> %d mC", mc, raw);
 		break;
 	case REFLOW_SPIKE_FORCED:
-		LOG_WRN("step to %d mC persisted for %d samples; believing the sensor",
-			raw, REFLOW_SPIKE_MAX_REJECTS);
+		LOG_WRN("step to %d mC survived %d suppressed samples; believing the sensor",
+			raw, REFLOW_SPIKE_MAX_REJECTS - 1);
 		break;
 	case REFLOW_SPIKE_ACCEPT:
 		break;
