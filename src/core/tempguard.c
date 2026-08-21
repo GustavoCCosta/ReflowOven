@@ -23,9 +23,15 @@ enum reflow_spike_result reflow_spike_filter(struct reflow_spike *s, int32_t raw
 	}
 
 	/*
-	 * Subtract in both directions instead of taking an absolute value: the
-	 * plausibility window in temp.c bounds the samples to -20..400 degC, but
-	 * this way the comparison cannot overflow regardless of what is fed in.
+	 * Subtract in both directions instead of taking an absolute value:
+	 * abs(INT32_MIN) is undefined, and this form has no such edge.
+	 *
+	 * It is NOT overflow-proof for arbitrary input — raw_mc - s->last_mc
+	 * overflows for far-apart extremes, which is undefined behaviour. What
+	 * makes it safe here is the caller: temp.c rejects anything outside
+	 * -20..400 degC as FAULT_SENSOR before this function is reached, so the
+	 * operands are always within 420000 of each other. A caller that drops
+	 * that window has to clamp, or bring its own wider type.
 	 */
 	jumped = (raw_mc - s->last_mc > REFLOW_SPIKE_MAX_STEP_MC) ||
 		 (s->last_mc - raw_mc > REFLOW_SPIKE_MAX_STEP_MC);
@@ -43,6 +49,10 @@ enum reflow_spike_result reflow_spike_filter(struct reflow_spike *s, int32_t raw
 	 * ever: without it, the pre-patch code fed the rejected value back into
 	 * last_mc and every following sample was measured against a reading
 	 * that never moved again (RFO-B05).
+	 */
+	/* The MAX_REJECTS'th consecutive jump is believed; the ones before it are
+	 * suppressed. Counting this way is what keeps the suppression window at
+	 * MAX_REJECTS - 1 samples rather than MAX_REJECTS.
 	 */
 	if (s->rejects + 1 < REFLOW_SPIKE_MAX_REJECTS) {
 		s->rejects++;
