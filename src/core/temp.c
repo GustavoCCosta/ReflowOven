@@ -7,6 +7,7 @@
 #include <zephyr/logging/log.h>
 
 #include "temp.h"
+#include "tempguard.h"
 
 LOG_MODULE_REGISTER(reflow_temp, CONFIG_REFLOW_LOG_LEVEL);
 
@@ -22,8 +23,7 @@ static const struct device *const tc_dev = DEVICE_DT_GET(THERMOCOUPLE_NODE);
 #define TEMP_MIN_MC (-20000)
 #define TEMP_MAX_MC (400000)
 
-static int32_t last_mc;
-static bool have_last;
+static struct reflow_spike spike;
 /* Latches while reads are failing, so the error is logged once per outage. */
 static bool err_logged;
 
@@ -34,16 +34,16 @@ int reflow_temp_init(void)
 		return -ENODEV;
 	}
 
-	have_last = false;
+	reflow_spike_reset(&spike);
 	err_logged = false;
 	LOG_INF("thermocouple %s ready", tc_dev->name);
 	return 0;
 }
 
-int reflow_temp_read(int32_t *temp_mc)
+int reflow_temp_read(int32_t *temp_mc, int32_t *raw_mc)
 {
 	struct sensor_value val;
-	int32_t mc;
+	int32_t mc, raw;
 	int ret;
 
 	ret = sensor_sample_fetch(tc_dev);
@@ -85,13 +85,21 @@ int reflow_temp_read(int32_t *temp_mc)
 	}
 
 	/*
-	 * Single-sample spike rejection. The MAX6675 has 0.25 degC resolution
-	 * and a ~220 ms conversion; a jump of more than 40 degC between
-	 * consecutive samples is electrical noise, not physics.
+	 * Bounded spike rejection: see tempguard.c. The filter may lag a real
+	 * step, it may not outlast one, and the raw sample leaves this function
+	 * too, so the over-temperature backstop is not fed through it.
 	 */
-	if (have_last && (mc - last_mc > 40000 || last_mc - mc > 40000)) {
-		LOG_WRN("spike rejected: %d -> %d mC", last_mc, mc);
-		mc = last_mc;
+	raw = mc;
+	switch (reflow_spike_filter(&spike, raw, &mc)) {
+	case REFLOW_SPIKE_REJECT:
+		LOG_WRN("spike rejected: %d -> %d mC", mc, raw);
+		break;
+	case REFLOW_SPIKE_FORCED:
+		LOG_WRN("step to %d mC persisted for %d samples; believing the sensor",
+			raw, REFLOW_SPIKE_MAX_REJECTS);
+		break;
+	case REFLOW_SPIKE_ACCEPT:
+		break;
 	}
 
 	if (err_logged) {
@@ -99,9 +107,10 @@ int reflow_temp_read(int32_t *temp_mc)
 		LOG_INF("thermocouple reading restored");
 	}
 
-	last_mc = mc;
-	have_last = true;
 	*temp_mc = mc;
+	if (raw_mc != NULL) {
+		*raw_mc = raw;
+	}
 
 	return 0;
 }
