@@ -26,23 +26,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Compilar host_sim com -Wall -Wextra -Werror
+        # host_sim.c faz #include "pid.h", que mora em src/core. Sem -Isrc/core e
+        # sem os dois fontes, este passo nunca compilou -- e como ele e quem mede
+        # o item 3 da Definition of Done, o item nunca foi medido. RFO-G10.
+        #
+        # Arquivo ausente e FALHA, nao "pulando": um job que se pula em silencio
+        # e indistinguivel de um job que passa, e foi assim que o defeito ficou
+        # escondido desde o primeiro commit.
         run: |
-          if [ -f tools/host_sim.c ]; then
-            gcc -std=c99 -Wall -Wextra -Werror -O2 -o /tmp/host_sim \
-                tools/host_sim.c -lm
-            /tmp/host_sim || true
-          else
-            echo "tools/host_sim.c ausente — pulando"
-          fi
+          test -f tools/host_sim.c || { echo "::error::tools/host_sim.c ausente"; exit 1; }
+          gcc -std=c99 -Wall -Wextra -Werror -O2 -o /tmp/host_sim \
+              tools/host_sim.c src/core/pid.c src/core/profile.c -Isrc/core -lm
+
+      - name: Executar host_sim (informativo — ver RFO-G12)
+        # DECISAO EXPLICITA, no lugar do `|| true` que estava aqui antes: a
+        # execucao roda e o log fica visivel, mas nao derruba o job.
+        #
+        # Motivo, e ele e mensuravel: o perfil "Bake / Dry 200C" (commit a089dad)
+        # soma 200+400+3000+180 = 3780 s de duracao nominal, e host_sim.c:97
+        # limita a corrida a `t < 3600.0`. O simulador nao consegue terminar esse
+        # perfil e devolve 1, com "run did not complete" -- apesar de o controle
+        # rastrear bem (erro rms 0,45 C). E limite da ferramenta, nao defeito do
+        # firmware. Enquanto o RFO-G12 nao fechar, exigir exit 0 aqui deixaria o
+        # job permanentemente vermelho por um motivo falso.
+        #
+        # Quando o G12 fechar, junte este passo ao de cima e deixe o exit code
+        # derrubar o job.
+        continue-on-error: true
+        run: /tmp/host_sim -v
 
   ztest:
     name: ztest (native_sim)
     runs-on: ubuntu-latest
+    # `ci:latest` sao 7,1 GiB comprimidos (~15-20 descomprimidos) e o runner tem
+    # ~14 GB livres: o pull enchia o disco e morria em "Initialize containers",
+    # tres tentativas, ~8 min, em TODO commit. Nao era a tag nem a idade da
+    # imagem -- era tamanho. E nao da para consertar com um passo de limpeza de
+    # disco, porque o container e baixado ANTES de qualquer passo rodar.
+    #
+    # `ci-base` sao 2,5 GiB e trazem o venv Python, ninja, ccache e dtc -- tudo
+    # que o native_sim precisa, ja que ele compila com o gcc do host e nao usa
+    # toolchain do SDK. RFO-G11.
     container:
-      image: ghcr.io/zephyrproject-rtos/ci:latest
+      image: ghcr.io/zephyrproject-rtos/ci-base:latest
       options: --user root
     env:
-      CMAKE_PREFIX_PATH: /opt/toolchains
+      # ci-base nao tem /opt/toolchains: apontar CMAKE_PREFIX_PATH para la faria
+      # o CMake procurar um SDK que nao existe.
+      ZEPHYR_TOOLCHAIN_VARIANT: host
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,11 +112,12 @@ jobs:
     # dentro de `if REFLOW_NET` — sao alternativas, nunca ligadas juntas.
     name: Matriz de modularidade (native_sim)
     runs-on: ubuntu-latest
+    # Mesma troca do job ztest, mesmo motivo (RFO-G11).
     container:
-      image: ghcr.io/zephyrproject-rtos/ci:latest
+      image: ghcr.io/zephyrproject-rtos/ci-base:latest
       options: --user root
     env:
-      CMAKE_PREFIX_PATH: /opt/toolchains
+      ZEPHYR_TOOLCHAIN_VARIANT: host
     strategy:
       fail-fast: false
       matrix:
@@ -122,11 +154,13 @@ jobs:
     name: Matriz de modularidade (boards)
     runs-on: ubuntu-latest
     continue-on-error: true
+    # Mesma troca de imagem (RFO-G11). Diferenca em relacao aos jobs de
+    # native_sim: board de verdade PRECISA de toolchain cruzado, e a ci-base nao
+    # traz SDK. Ele e instalado num passo abaixo, com apenas os dois toolchains
+    # que estas combinacoes usam -- e nao os ~15 que faziam a `ci` nao caber.
     container:
-      image: ghcr.io/zephyrproject-rtos/ci:latest
+      image: ghcr.io/zephyrproject-rtos/ci-base:latest
       options: --user root
-    env:
-      CMAKE_PREFIX_PATH: /opt/toolchains
     strategy:
       fail-fast: false
       matrix:
@@ -149,6 +183,17 @@ jobs:
           if [ -f app/west.yml ]; then west init -l app; else west init ws; fi
           west update --narrow -o=--depth=1
           west zephyr-export
+
+      - name: Instalar SDK (so os toolchains destas boards)
+        run: |
+          west sdk install -t arm-zephyr-eabi -t xtensa-espressif_esp32-zephyr-elf
+
+      - name: Buscar blobs do HAL Espressif
+        # O alvo esp32 com REFLOW_NET=y + LINK_WIFI=y nao linka sem os blobs de
+        # Wi-Fi. So faz sentido para a combinacao esp32; nas outras e ruido.
+        if: startsWith(matrix.nome, 'esp32')
+        run: west blobs fetch hal_espressif
+
       - name: Build ${{ matrix.nome }} @ ${{ matrix.board }}
         run: |
           west build -p always -b ${{ matrix.board }} -d build/${{ matrix.nome }} \
