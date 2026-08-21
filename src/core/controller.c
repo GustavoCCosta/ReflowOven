@@ -14,6 +14,7 @@
 #include "pid.h"
 #include "profile.h"
 #include "temp.h"
+#include "tempguard.h"
 
 LOG_MODULE_REGISTER(reflow_ctrl, CONFIG_REFLOW_LOG_LEVEL);
 
@@ -48,6 +49,12 @@ static struct {
 	struct reflow_run run;
 	struct pid_state pid;
 	int32_t temp_mc;
+	/*
+	 * The sample as it came off the chip, before spike rejection. Only the
+	 * absolute backstop below reads it: a backstop that shares an input
+	 * filter with the loop it backs up is not a backstop (RFO-B05).
+	 */
+	int32_t temp_raw_mc;
 	bool temp_valid;
 	uint16_t duty;
 	int32_t setpoint_mc;
@@ -256,8 +263,8 @@ static void controller_thread(void *a, void *b, void *c)
 		since_sample += dt_ms;
 
 		if (ready && since_sample >= SAMPLE_MS) {
-			int32_t mc;
-			int ret = reflow_temp_read(&mc);
+			int32_t mc, raw;
+			int ret = reflow_temp_read(&mc, &raw);
 
 			sample_dt = (uint32_t)(now - last_sample);
 			last_sample = now;
@@ -265,6 +272,7 @@ static void controller_thread(void *a, void *b, void *c)
 
 			if (ret == 0) {
 				ctx.temp_mc = mc;
+				ctx.temp_raw_mc = raw;
 				ctx.temp_valid = true;
 				new_sample = true;
 			} else {
@@ -291,9 +299,13 @@ static void controller_thread(void *a, void *b, void *c)
 			}
 		}
 
-		/* Hard limit, independent of the profile's own abort level. */
-		if (ctx.temp_valid && ctx.temp_mc >= ABS_MAX_MC &&
-		    ctx.state != REFLOW_STATE_FAULT) {
+		/*
+		 * Hard limit, independent of the profile's own abort level and of
+		 * the spike rejector: fed the raw sample as well as the filtered
+		 * one, so a suppressed rise still trips it.
+		 */
+		if (ctx.temp_valid && ctx.state != REFLOW_STATE_FAULT &&
+		    reflow_overtemp_tripped(ctx.temp_mc, ctx.temp_raw_mc, ABS_MAX_MC)) {
 			enter_fault(REFLOW_FAULT_OVERTEMP);
 		}
 

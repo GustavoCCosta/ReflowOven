@@ -12,6 +12,7 @@
 #include "profile.h"
 #include "net/cmdparse.h"
 #include "net/httpgate.h"
+#include "tempguard.h"
 
 /* ------------------------------------------------------------------ PID */
 
@@ -654,3 +655,162 @@ ZTEST(reflow_httpgate, test_single_byte_corruption_is_survivable)
 }
 
 ZTEST_SUITE(reflow_httpgate, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------- temperature guard rails */
+
+#define LIMIT_MC 270000 /* CONFIG_REFLOW_ABS_MAX_TEMP_C default, in milli-degC */
+
+/*
+ * RFO-T04. The filter may lag a real step, it may not outlast it. Scenario A
+ * of RFO-B05: stable at 240 degC, the thermocouple is reseated and now reads
+ * 25 degC for good. Reporting 240 degC after eight real samples of 25 degC is
+ * the defect.
+ */
+ZTEST(reflow_tempguard, test_persistent_step_is_eventually_accepted)
+{
+	struct reflow_spike s;
+	int32_t out = 0;
+	int i;
+
+	reflow_spike_reset(&s);
+
+	for (i = 0; i < 5; i++) {
+		zassert_equal(reflow_spike_filter(&s, 240000, &out), REFLOW_SPIKE_ACCEPT,
+			      "a steady reading is not a spike");
+		zassert_equal(out, 240000, "steady reading altered");
+	}
+
+	/* The suppression window is allowed, and it is bounded. */
+	for (i = 0; i < REFLOW_SPIKE_MAX_REJECTS - 1; i++) {
+		zassert_equal(reflow_spike_filter(&s, 25000, &out), REFLOW_SPIKE_REJECT,
+			      "sample %d should still be treated as a spike", i);
+		zassert_equal(out, 240000, "rejected sample must report the last value");
+	}
+
+	zassert_equal(reflow_spike_filter(&s, 25000, &out), REFLOW_SPIKE_FORCED,
+		      "after %d consecutive rejections the sensor must be believed",
+		      REFLOW_SPIKE_MAX_REJECTS);
+	zassert_equal(out, 25000, "the new value must be reported, not suppressed");
+
+	/* And it stays believed: no oscillation back to the stale value. */
+	for (i = 0; i < 8; i++) {
+		zassert_equal(reflow_spike_filter(&s, 25000, &out), REFLOW_SPIKE_ACCEPT,
+			      "the accepted value is now the reference");
+		zassert_equal(out, 25000, "reading stuck at the pre-step value");
+	}
+}
+
+/*
+ * RFO-T04, scenario B: a real 200 degC/s ramp is 50 degC per 250 ms sample, so
+ * every single sample looks like a spike. The reported temperature must track
+ * the oven with bounded lag; the defect reports 25 degC while the oven passes
+ * 275 degC.
+ */
+ZTEST(reflow_tempguard, test_real_ramp_is_tracked_with_bounded_lag)
+{
+	struct reflow_spike s;
+	int32_t out = 0;
+	int32_t raw;
+
+	reflow_spike_reset(&s);
+	(void)reflow_spike_filter(&s, 25000, &out);
+
+	for (raw = 75000; raw <= 325000; raw += 50000) {
+		(void)reflow_spike_filter(&s, raw, &out);
+		zassert_true(raw - out <= REFLOW_SPIKE_MAX_STEP_MC * REFLOW_SPIKE_MAX_REJECTS,
+			     "reported %d mC while the oven is at %d mC", out, raw);
+	}
+
+	zassert_true(out >= LIMIT_MC,
+		     "a runaway ramp must be visible to the controller, reported %d mC",
+		     out);
+}
+
+/*
+ * RFO-B05, availability scenario: the thermocouple falls on the element, reads
+ * 400 degC, then returns to air. The step back down is a spike too, so the
+ * reading latches high and FAULT_OVERTEMP reappears the instant it is cleared.
+ */
+ZTEST(reflow_tempguard, test_recovers_from_a_reading_latched_high)
+{
+	struct reflow_spike s;
+	int32_t out = 0;
+	int i;
+
+	reflow_spike_reset(&s);
+	(void)reflow_spike_filter(&s, 400000, &out);
+	zassert_equal(out, 400000, "the first sample has nothing to be compared against");
+
+	for (i = 0; i < REFLOW_SPIKE_MAX_REJECTS + 1; i++) {
+		(void)reflow_spike_filter(&s, 25000, &out);
+	}
+
+	zassert_equal(out, 25000, "the oven must become usable again without a power cycle");
+}
+
+/*
+ * The fix must not cost the filter its job: an isolated spike between two good
+ * samples is still rejected, and does not accumulate towards the limit.
+ */
+ZTEST(reflow_tempguard, test_isolated_spikes_are_still_rejected)
+{
+	struct reflow_spike s;
+	int32_t out = 0;
+	int i;
+
+	reflow_spike_reset(&s);
+	(void)reflow_spike_filter(&s, 100000, &out);
+
+	for (i = 0; i < 10; i++) {
+		zassert_equal(reflow_spike_filter(&s, 200000, &out), REFLOW_SPIKE_REJECT,
+			      "isolated spike %d was let through", i);
+		zassert_equal(out, 100000, "spike leaked into the reported value");
+
+		zassert_equal(reflow_spike_filter(&s, 100000, &out), REFLOW_SPIKE_ACCEPT,
+			      "the good sample after a spike must be accepted");
+		zassert_equal(out, 100000, "good sample altered");
+	}
+}
+
+/*
+ * RFO-T05. The absolute cut-out must be independent of the spike rejector:
+ * the whole point of a backstop is that it does not share the input path with
+ * the loop it backs up. Here the filter is legitimately suppressing the step
+ * and the raw sample is already past the limit.
+ */
+ZTEST(reflow_tempguard, test_backstop_trips_on_the_raw_sample)
+{
+	struct reflow_spike s;
+	int32_t out = 0;
+	enum reflow_spike_result r;
+
+	reflow_spike_reset(&s);
+	(void)reflow_spike_filter(&s, 240000, &out);
+
+	r = reflow_spike_filter(&s, 290000, &out);
+	zassert_equal(r, REFLOW_SPIKE_REJECT, "one 50 degC step is still a spike");
+	zassert_equal(out, 240000, "the control loop sees the filtered value");
+
+	zassert_true(reflow_overtemp_tripped(out, 290000, LIMIT_MC),
+		     "the element stays energised: the cut-out is blind to the raw %d mC",
+		     290000);
+}
+
+ZTEST(reflow_tempguard, test_backstop_boundaries)
+{
+	/* Nothing above the limit: no trip. */
+	zassert_false(reflow_overtemp_tripped(269999, 269999, LIMIT_MC),
+		      "tripped below the limit");
+
+	/* At the limit, both ways: controller.c compares with >=. */
+	zassert_true(reflow_overtemp_tripped(LIMIT_MC, 25000, LIMIT_MC),
+		     "filtered value at the limit must trip");
+	zassert_true(reflow_overtemp_tripped(25000, LIMIT_MC, LIMIT_MC),
+		     "raw value at the limit must trip");
+
+	/* A reading latched high by the filter must keep tripping. */
+	zassert_true(reflow_overtemp_tripped(400000, 25000, LIMIT_MC),
+		     "a stale high reading is not a reason to re-energise");
+}
+
+ZTEST_SUITE(reflow_tempguard, NULL, NULL, NULL, NULL, NULL);
