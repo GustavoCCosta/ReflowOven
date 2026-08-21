@@ -51,6 +51,7 @@ means flipping the symbol to `n`.
 | `src/shell_cmds.c` | `reflow status\|start\|stop\|clear\|profile` (`CONFIG_REFLOW_SHELL`) |
 | `snippets/usb-webui/` | `-S usb-webui`: the overlay and conf for the USB link |
 | `tests/logic/` | ztest suite for the PID and the profile machine |
+| `tests/boot/` | ztest suite for the SSR gate's state at boot, on the GPIO emulator |
 | `tools/host_sim.c` | Closed-loop simulation of the same logic on the build host |
 | `tools/test_page.js` | Optional: `node tools/test_page.js` smoke tests the page's transport choice and rendering |
 
@@ -374,7 +375,14 @@ Two Zephyr options you may still need by hand:
 ## Tests
 
 ```sh
-west twister -T tests -p native_sim          # 12 unit tests, PID + profile
+west twister -T tests -p native_sim          # unit tests: PID, profile, and the boot state of the SSR gate
+```
+
+On Windows `native_sim` is filtered out ("Native platform requires Linux"); both
+suites also run on `qemu_x86`, which is what the process prescribes locally:
+
+```sh
+west twister -T tests -p qemu_x86 --timeout-multiplier 6
 ```
 
 Closed-loop check with a first-order oven model, no hardware and no Zephyr:
@@ -417,6 +425,25 @@ a fault that needs an explicit clear:
   oven cannot follow the profile (`FAULT_TIMEOUT`);
 - the control loop stopping: the heater output disarms itself if no duty request
   arrives within `CONFIG_REFLOW_HEATER_STALE_MS`.
+
+### The gate needs a pull-down, in hardware
+
+**Fit a 10k resistor from the SSR gate pin to ground.** This is a requirement,
+not a suggestion, and no firmware change can replace it.
+
+The firmware drives the gate low from a `SYS_INIT` hook in `heater.c`, at
+`POST_KERNEL`, which is the earliest level where the GPIO controller exists on
+these targets — before that there is no device to configure. So the window from
+power-on reset until the GPIO driver comes up is covered by nothing but the
+SoC's own reset state, and on both targets that state is an input: high
+impedance. Opto-coupled SSR modules commonly hold a pull-up on their input and
+read high impedance as ON, so a board in a reset loop (brownout, or a watchdog
+that keeps firing) can heat continuously with no control loop running at all.
+An external pull-down is what makes that window safe.
+
+Before RFO-B06 the window was far worse than a boot: nothing claimed the pin
+until `reflow_heater_init()` ran from the control thread, which
+`K_THREAD_DEFINE` starts 100 ms after the kernel.
 
 None of this replaces hardware protection. A mains oven needs a thermal fuse in
 series with the element, and the SSR sized and heatsinked for the load. Also
