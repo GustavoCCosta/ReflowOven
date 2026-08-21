@@ -11,6 +11,7 @@ target_sources(app PRIVATE
   src/main.c
   ${CORE}/pid.c
   ${CORE}/profile.c
+  ${CORE}/tempguard.c
   ${SRC}/net/cmdparse.c
   ${SRC}/net/httpgate.c
 )
