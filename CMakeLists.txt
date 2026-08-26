@@ -22,6 +22,7 @@ target_sources(app PRIVATE
   src/core/pid.c
   src/core/profile.c
   src/core/temp.c
+  src/core/tempguard.c
 )
 
 # Optional features. Each one is a leaf: nothing in the core references them.
