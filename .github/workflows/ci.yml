@@ -217,6 +217,7 @@ jobs:
         # Wi-Fi. So faz sentido para a combinacao esp32; nas outras e ruido.
         if: startsWith(matrix.nome, 'esp32')
         working-directory: ws
+        run: west blobs fetch hal_espressif
 
 
       - name: Build ${{ matrix.nome }} @ ${{ matrix.board }}
