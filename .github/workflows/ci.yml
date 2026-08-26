@@ -80,17 +80,27 @@ jobs:
           path: app
 
       - name: Inicializar workspace west
+        # `--narrow` e opcao de `west update`, nao de `west init`: a forma antiga
+        # morria com "west init: error: unexpected arguments: ['--narrow']". E o
+        # `if [ -f app/west.yml ]` era ramo morto -- este repositorio e topologia
+        # T1 (o manifesto e zephyr/west.yml), entao o `else` sempre rodava.
+        # RFO-G14.
         run: |
-          if [ -f app/west.yml ]; then
-            west init -l app
-          else
-            west init --narrow ws
-            mv app ws/app || true
-          fi
+          west init ws
+          mv app ws/app
+
+      - name: Atualizar workspace
+        # `west init ws` cria o workspace DENTRO de ws/, e cada passo `run:` comeca
+        # no diretorio padrao do job -- um `cd ws` aqui nao sobreviveria ao passo
+        # seguinte. Por isso `working-directory: ws` em todo passo que chama west
+        # daqui pra frente. Sem isso: "FATAL ERROR: no west workspace found".
+        working-directory: ws
+        run: |
           west update --narrow -o=--depth=1
           west zephyr-export
 
       - name: Twister
+        working-directory: ws
         run: |
           west twister -T app/tests -p native_sim --inline-logs -v
 
@@ -99,7 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: twister-out
-          path: twister-out/
+          path: ws/twister-out/
           retention-days: 14
 
   modularidade:
@@ -133,11 +143,17 @@ jobs:
         with:
           path: app
       - name: Inicializar workspace west
+        # Mesmo conserto do job ztest (RFO-G14).
         run: |
-          if [ -f app/west.yml ]; then west init -l app; else west init ws; fi
+          west init ws
+          mv app ws/app
+      - name: Atualizar workspace
+        working-directory: ws
+        run: |
           west update --narrow -o=--depth=1
           west zephyr-export
       - name: Build ${{ matrix.combo.nome }} @ native_sim
+        working-directory: ws
         run: |
           west build -p always -b native_sim -d build/${{ matrix.combo.nome }} \
             app -- ${{ matrix.combo.flags }}
@@ -179,12 +195,20 @@ jobs:
         with:
           path: app
       - name: Inicializar workspace west
+        # Mesmo conserto do job ztest (RFO-G14).
         run: |
-          if [ -f app/west.yml ]; then west init -l app; else west init ws; fi
+          west init ws
+          mv app ws/app
+
+      - name: Atualizar workspace
+        working-directory: ws
+        run: |
           west update --narrow -o=--depth=1
           west zephyr-export
 
       - name: Instalar SDK (so os toolchains destas boards)
+        # `west sdk install` le a versao do SDK do manifesto: precisa do workspace.
+        working-directory: ws
         run: |
           west sdk install -t arm-zephyr-eabi -t xtensa-espressif_esp32-zephyr-elf
 
@@ -192,9 +216,11 @@ jobs:
         # O alvo esp32 com REFLOW_NET=y + LINK_WIFI=y nao linka sem os blobs de
         # Wi-Fi. So faz sentido para a combinacao esp32; nas outras e ruido.
         if: startsWith(matrix.nome, 'esp32')
-        run: west blobs fetch hal_espressif
+        working-directory: ws
+
 
       - name: Build ${{ matrix.nome }} @ ${{ matrix.board }}
+        working-directory: ws
         run: |
           west build -p always -b ${{ matrix.board }} -d build/${{ matrix.nome }} \
             app -- ${{ matrix.flags }}
