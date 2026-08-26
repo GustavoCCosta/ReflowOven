@@ -80,6 +80,14 @@ bool reflow_run_heater_allowed(const struct reflow_run *run,
 /* Sum of nominal stage durations, for progress reporting. */
 uint32_t reflow_profile_nominal_ms(const struct reflow_profile *prof);
 
+/*
+ * Longest a run of this profile can legally last: nominal plus the grace period
+ * of every stage. Past this the state machine has already declared
+ * REFLOW_RUN_ERR_TIMEOUT, so it is the right cut-off for a simulation loop -
+ * and the wrong thing to replace with a literal.
+ */
+uint32_t reflow_profile_max_ms(const struct reflow_profile *prof);
+
 /* Built-in profile table. */
 uint8_t reflow_profile_count(void);
 const struct reflow_profile *reflow_profile_get(uint8_t idx);

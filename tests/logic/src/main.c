@@ -241,6 +241,63 @@ ZTEST(reflow_profile, test_nominal_duration)
 		      "nominal duration mismatch");
 }
 
+
+/*
+ * RFO-G12. O teto de uma simulação tem de vir do perfil. `host_sim` tinha 3600 s
+ * literais e o perfil de bake soma 3780 s de nominal, então aquela execução não
+ * podia terminar — a ferramenta reprovava um controle que rastreava com 0,45 °C
+ * de erro rms.
+ */
+ZTEST(reflow_profile, test_max_ms_cobre_a_duracao_de_todo_perfil_embutido)
+{
+	const struct reflow_profile *p;
+	uint8_t i;
+
+	for (i = 0; (p = reflow_profile_get(i)) != NULL && i < 16; i++) {
+		uint32_t nominal = reflow_profile_nominal_ms(p);
+		uint32_t teto = reflow_profile_max_ms(p);
+
+		zassert_true(teto > nominal,
+			     "perfil %u (%s): teto %u nao passa do nominal %u",
+			     i, p->name, teto, nominal);
+
+		/* O teto e exatamente o ponto em que a maquina de estados ja
+		 * declarou timeout: nominal mais a graca de cada estagio.
+		 */
+		zassert_equal(teto, nominal + (uint32_t)p->n_stages * p->grace_ms,
+			      "perfil %u (%s): teto %u nao e nominal + n*graca",
+			      i, p->name, teto);
+	}
+	zassert_true(i >= 4, "esperava ao menos 4 perfis embutidos, vi %u", i);
+}
+
+/*
+ * A regressao concreta do a089dad, fixada como teste: existe perfil embutido
+ * mais longo que o teto literal antigo. Enquanto isto valer, qualquer volta ao
+ * numero fixo quebra aqui em vez de quebrar no host_sim de quem for ajustar
+ * ganhos.
+ */
+ZTEST(reflow_profile, test_existe_perfil_mais_longo_que_o_teto_antigo)
+{
+	const uint32_t TETO_ANTIGO_MS = 3600U * 1000U;
+	const struct reflow_profile *p;
+	uint8_t i;
+	bool achou = false;
+
+	for (i = 0; (p = reflow_profile_get(i)) != NULL && i < 16; i++) {
+		if (reflow_profile_nominal_ms(p) > TETO_ANTIGO_MS) {
+			achou = true;
+			zassert_true(reflow_profile_max_ms(p) > reflow_profile_nominal_ms(p),
+				     "perfil %s cabe no nominal mas nao no teto", p->name);
+		}
+	}
+
+	zassert_true(achou,
+		     "nenhum perfil passa de %u ms; se um foi removido, este teste "
+		     "perdeu o sentido e deve ser revisto, nao apagado",
+		     TETO_ANTIGO_MS);
+}
+
 ZTEST_SUITE(reflow_profile, NULL, NULL, NULL, NULL, NULL);
 
 /* ------------------------------------------------------- command dispatch */

@@ -81,6 +81,29 @@ uint32_t reflow_profile_nominal_ms(const struct reflow_profile *prof)
 	return total;
 }
 
+uint32_t reflow_profile_max_ms(const struct reflow_profile *prof)
+{
+	/*
+	 * The longest a run can legally last: every stage takes its nominal
+	 * time plus the whole grace period before reflow_run_tick() calls it a
+	 * REFLOW_RUN_ERR_TIMEOUT. grace_ms is per profile, not per stage, so it
+	 * counts once per stage.
+	 *
+	 * This is the bound a simulation or a bench harness should use as its
+	 * cut-off, instead of a literal (RFO-G12: host_sim had 3600 s hardcoded
+	 * and could never finish the 3780 s bake profile). Deriving it this way
+	 * cannot hide a profile that fails to converge: the state machine
+	 * declares the timeout itself at or before this point, so the caller
+	 * still sees a failure rather than a completed run.
+	 */
+	uint32_t total = reflow_profile_nominal_ms(prof);
+
+	for (uint8_t i = 0; i < prof->n_stages; i++) {
+		total += prof->grace_ms;
+	}
+	return total;
+}
+
 bool reflow_run_heater_allowed(const struct reflow_run *run,
 			       const struct reflow_profile *prof)
 {
