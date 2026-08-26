@@ -102,14 +102,28 @@ def ler_patch(caminho: str) -> str:
 
 
 def extrai_diff(texto: str) -> str:
-    """Aceita um patch cru ou o corpo de um doc com o diff em bloco ```diff."""
+    """Aceita um patch cru ou o corpo de um doc com o diff em bloco ```diff.
+
+    Cuidado com o fim do patch (RFO-G07): numa hunk, a linha de contexto de uma
+    linha em branco do arquivo e exatamente `" "` — um espaco, nada mais. Um
+    `.rstrip()` sobre o texto inteiro come esse espaco, a contagem do cabecalho
+    `@@` deixa de bater, e o git recusa o patch com "corrupt patch". O sintoma
+    aparece longe da causa: quem le a mensagem conclui que o patch foi gerado
+    errado, e o defeito e da ferramenta que o leu.
+
+    Entao so descartamos linhas VAZIAS de verdade no fim — as que o documento
+    poe depois do bloco. Uma linha com um espaco e conteudo do patch.
+    """
     m = re.search(r"```(?:diff|patch)\s*\n(.*?)```", texto, re.S)
     corpo = m.group(1) if m else texto
     linhas = corpo.splitlines()
     # descarta preambulo antes do primeiro cabecalho de diff
     for i, ln in enumerate(linhas):
         if ln.startswith(("diff --git ", "--- ", "Index: ")):
-            return "\n".join(linhas[i:]).rstrip() + "\n"
+            fim = len(linhas)
+            while fim > i and linhas[fim - 1] == "":
+                fim -= 1
+            return "\n".join(linhas[i:fim]) + "\n"
     return corpo
 
 
@@ -163,8 +177,11 @@ def cmd_base(a):
                     entrada=diff, check=False)
             if p.returncode != 0:
                 die("MAIN.patch nao aplica sobre origin/main.\n"
-                    "provavelmente o Gustavo empurrou algo novo e o patch precisa\n"
-                    "ser regerado pelo Gerente sobre a main atual.\n"
+                    "esta ferramenta nao sabe por que, e nao vai adivinhar.\n"
+                    "causas possiveis, sem ordem de probabilidade: a main andou,\n"
+                    "o patch foi gerado sobre outra base, ou o patch chegou\n"
+                    "corrompido na leitura. confira antes de atribuir a alguem -\n"
+                    "`git log --oneline -3 origin/main` e o erro do git abaixo.\n"
                     + (p.stderr or "").strip())
             git("add", "-A")
             git("-c", "user.email=agente@reflow.local", "-c", "user.name=flow",
@@ -226,8 +243,11 @@ def cmd_apply(a):
     p = git("apply", "--3way", "--whitespace=nowarn", "-", entrada=diff, check=False)
     if p.returncode != 0:
         die("o patch nao aplica sobre a BASE.\n"
-            "isso normalmente significa que o PR foi gerado sobre uma BASE mais\n"
-            "antiga. devolva ao Dev pedindo regeracao.\n" + (p.stderr or "").strip())
+            "esta ferramenta nao sabe de quem e a causa, e ja errou nisso: o\n"
+            "RFO-G07 era ela mesma corrompendo a ultima hunk enquanto mandava\n"
+            "devolver ao Dev. pode ser BASE mais antiga, pode ser o patch, pode\n"
+            "ser a leitura. leia o erro do git abaixo antes de devolver.\n"
+            + (p.stderr or "").strip())
     commit_trabalho(f"PR aplicado a partir de {Path(a.patch).name}")
     print(f"{C['grn']}patch aplicado e fixado em commit{C['r']}")
     print(git("diff", "--stat", BR_BASE, "HEAD").stdout)
@@ -286,6 +306,48 @@ def arquivos_adicionados(base: str, head: str, dirs: list) -> list:
                        base, head, "--", *dirs))
 
 
+def base_ref_opt():
+    """A BASE, ou None se nao der para determinar. Nao mata o processo.
+
+    v1 criava a branch `flow-base` porque o codigo circulava como patch dentro de
+    documento. Na v2 o PR e um branch de verdade, entao a BASE e o ponto em que
+    ele saiu da main: `git merge-base origin/main HEAD`.
+
+    Merge-base, e nao `origin/main` direto: se a main andou depois que o branch
+    saiu, comparar com a ponta arrastaria mudancas de terceiros para dentro da
+    mutacao. A suite ficaria vermelha por causa delas e o item 4 da Definition of
+    Done passaria a medir a coisa errada — que e pior do que nao medir.
+
+    A branch `flow-base` ainda e aceita quando existe, para nao quebrar quem
+    estiver no meio de uma sessao do fluxo antigo.
+    """
+    if git("rev-parse", "--verify", BR_BASE, check=False).returncode == 0:
+        return BR_BASE
+    p = git("merge-base", "origin/main", "HEAD", check=False)
+    sha = (p.stdout or "").strip()
+    if p.returncode == 0 and sha:
+        return sha
+    return None
+
+
+def base_ref() -> str:
+    """A BASE, exigida. So para quem PRECISA dela para agir com seguranca.
+
+    A mutacao apaga arquivo, entao ela nao pode adivinhar a BASE: se nao da para
+    determinar, morre com instrucao. O `--restaurar` NAO usa esta versao — ver o
+    comentario em cmd_mutate. Recuperacao nao pode ter mais pre-condicao do que a
+    operacao que ela desfaz.
+    """
+    base = base_ref_opt()
+    if base is None:
+        die("nao consegui determinar a BASE: nao existe a branch " + BR_BASE +
+            " nem merge-base com origin/main.\n"
+            "rode `git fetch origin` e confira se este branch saiu da main.\n"
+            "para desfazer uma mutacao ja feita, `flow mutate --restaurar` NAO\n"
+            "precisa da BASE e continua funcionando.")
+    return base
+
+
 def cmd_mutate(a):
     """Reverte SO o codigo-fonte para o estado da BASE, mantendo os testes do PR.
 
@@ -293,7 +355,7 @@ def cmd_mutate(a):
 
     Como conferir que a mutacao mordeu de fato, depois de rodar:
         git status --porcelain          # tem que listar M e D no codigo-fonte
-        git diff --stat flow-base       # tem que sair VAZIO (fonte == BASE)
+        git diff --stat $(git merge-base origin/main HEAD)   # tem que sair VAZIO
     """
     exige_repo()
     candidatos = a.src or SRC_DIRS_DEFAULT
@@ -307,8 +369,13 @@ def cmd_mutate(a):
         # A mutacao pode ter ressuscitado arquivo num diretorio que so a BASE
         # tem; o pathspec da limpeza precisa alcanca-lo.
         alvos = list(dirs)
-        if git("rev-parse", "--verify", BR_BASE, check=False).returncode == 0:
-            for d in dirs_na_arvore(candidatos, BR_BASE):
+        # BASE best-effort, de proposito: aqui ela so ALARGA o pathspec da
+        # limpeza. Exigi-la faria a recuperacao ter mais pre-condicao do que a
+        # mutacao que ela desfaz — e o estado a recuperar e justamente aquele em
+        # que arquivos ja foram apagados. Sem BASE, restaura o que da.
+        base_op = base_ref_opt()
+        if base_op is not None:
+            for d in dirs_na_arvore(candidatos, base_op):
                 if d not in alvos:
                     alvos.append(d)
         git("checkout", "HEAD", "--", *dirs)
@@ -325,28 +392,32 @@ def cmd_mutate(a):
         print("codigo-fonte restaurado ao estado do PR.")
         return
 
+    # Daqui para baixo e a MUTACAO, que apaga arquivo. Esta e a operacao que
+    # nao pode adivinhar a BASE: sem ela, morre com instrucao.
+    base = base_ref()
+
     # Sem commit, HEAD == BASE e o `--restaurar` apagaria o trabalho em vez de
     # devolve-lo. Exigir arvore limpa e o que impede essa perda.
     if git("status", "--porcelain").stdout.strip():
         die("ha alteracoes nao commitadas. rode `flow patch` (que commita) antes\n"
             "de mutar — senao `flow mutate --restaurar` perderia esse trabalho.")
-    if git("rev-parse", "HEAD").stdout == git("rev-parse", BR_BASE).stdout:
+    if git("rev-parse", "HEAD").stdout == git("rev-parse", base).stdout:
         die("HEAD e igual a BASE: nao ha patch para mutar. aplique o PR primeiro.")
 
     dirs_head = dirs_na_arvore(candidatos, "HEAD")
     if not dirs_head:
         die("nenhum diretorio de codigo-fonte encontrado; passe --src")
-    dirs_base = dirs_na_arvore(candidatos, BR_BASE)
+    dirs_base = dirs_na_arvore(candidatos, base)
 
     # 1. Reverter o que a BASE tem (isto tambem RESSUSCITA o que o PR apagou).
     if dirs_base:
-        git("checkout", BR_BASE, "--", *dirs_base)
+        git("checkout", base, "--", *dirs_base)
 
     # 2. Apagar o que so o PR tem. Restrito aos diretorios de codigo-fonte: o
     #    pathspec do `git diff` acima e a unica coisa que decide o que morre, e
     #    `tests/` nunca esta em SRC_DIRS_DEFAULT. Preferido a `git clean -fd`,
     #    que apagaria tambem arquivo nao rastreado que nao veio do PR.
-    novos = arquivos_adicionados(BR_BASE, "HEAD", dirs_head)
+    novos = arquivos_adicionados(base, "HEAD", dirs_head)
     for rel in novos:
         alvo = DIR_PADRAO / rel
         # Sem `missing_ok`: este caminho veio de `--diff-filter=A`, entao ele
@@ -366,7 +437,7 @@ def cmd_mutate(a):
     for d in dirs_base:
         if d not in alvos:
             alvos.append(d)
-    resto = git("diff", "--stat", BR_BASE, "--", *alvos).stdout.strip()
+    resto = git("diff", "--stat", base, "--", *alvos).stdout.strip()
 
     print(f"{C['yel']}MUTACAO ATIVA{C['r']} — {', '.join(dirs_head)} voltaram ao "
           f"estado da BASE; testes do PR mantidos.")
