@@ -60,11 +60,20 @@ ZTEST(reflow_boot, test_ssr_is_low_before_any_thread_runs)
 }
 
 /*
- * The pin is declared GPIO_ACTIVE_HIGH in every overlay and the firmware asks
- * for GPIO_OUTPUT_INACTIVE, so "inactive" and "physically low" have to be the
- * same thing. If someone flips the polarity in an overlay without revisiting
- * heater.c, inactive would mean driving the gate high — this is the assertion
- * that would catch it.
+ * Sanity check on THIS SUITE'S OWN fixture, and nothing more.
+ *
+ * `ssr` comes from DT_ALIAS(reflow_ssr) resolved in the devicetree of this test
+ * application — tests/boot/boards/<platform>.overlay. So what the assertion
+ * guards is that the simulated overlay declares GPIO_ACTIVE_HIGH, which is what
+ * makes the "physically low" reading in the test above meaningful. It says
+ * nothing about the three board overlays: flipping the polarity in the Pico or
+ * ESP32 overlay — the only ones where the mistake energises something real — is
+ * invisible from here.
+ *
+ * The guarantee for the real targets is the BUILD_ASSERT on DT_GPIO_FLAGS in
+ * heater.c, which resolves against the devicetree actually being built and so
+ * fails the build on every board. Keep both: this one stops the fixture from
+ * drifting out from under the test above, that one stops the boards.
  */
 ZTEST(reflow_boot, test_inactive_means_physically_low)
 {

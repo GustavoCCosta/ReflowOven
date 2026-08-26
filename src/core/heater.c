@@ -63,8 +63,33 @@ static void drive(bool on)
  * That window is why the hardware needs a pull-down on the gate; see the
  * "Safety" section of README.md.
  */
+/*
+ * The safe-init must run after the GPIO driver. This assertion covers only the
+ * PRIORITY half of that invariant, and cannot cover the other half: the real
+ * rule is "later init level, or same level and later priority". If someone moves
+ * a GPIO driver to a later LEVEL (say APPLICATION) while keeping priority 40,
+ * this stays true and the ordering breaks silently. There is no cheap way to
+ * compare levels in a BUILD_ASSERT, so it is written here instead: whoever
+ * changes an init level has to re-check by hand.
+ */
 BUILD_ASSERT(CONFIG_KERNEL_INIT_PRIORITY_DEVICE > CONFIG_GPIO_INIT_PRIORITY,
 	     "the SSR safe-init must run after the GPIO driver, not before it");
+
+/*
+ * The gate must be wired active-high. GPIO_OUTPUT_INACTIVE below asks the driver
+ * for the logically inactive level; with GPIO_ACTIVE_LOW in the devicetree, that
+ * drives the pin *high* — which is exactly what energises an opto-coupled SSR,
+ * so the fix for RFO-B06 would become the cause of the thing it prevents.
+ *
+ * This lives here, and not in a test, on purpose: DT_GPIO_FLAGS resolves against
+ * the devicetree of whatever is being BUILT, so on a board build it reads the
+ * board overlay. A ztest can only ever see its own simulated overlay, so it
+ * cannot guard the three real targets. Invert the polarity in any board overlay
+ * and this stops the build there.
+ */
+BUILD_ASSERT((DT_GPIO_FLAGS(SSR_NODE, gpios) & GPIO_ACTIVE_LOW) == 0,
+	     "reflow-ssr must be GPIO_ACTIVE_HIGH: with ACTIVE_LOW, "
+	     "GPIO_OUTPUT_INACTIVE drives the gate high and turns the element on");
 
 static int ssr_safe_init(void)
 {
