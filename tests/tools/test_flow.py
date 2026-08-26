@@ -103,5 +103,35 @@ class TestExtraiDiff(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr or "")
 
 
+
+    def test_linha_final_so_de_espacos_e_tratada_como_conteudo(self):
+        """Escolha deliberada, registrada como teste em vez de acidente.
+
+        O laço descarta apenas linhas exatamente ''. Uma linha final com espaços
+        — que o editor de quem montou o documento pode ter deixado — antes era
+        comida pelo .rstrip() e agora chega ao git como linha de contexto.
+
+        Preservar é o lado seguro de errar, porque ' ' (um espaço) é a linha de
+        contexto de uma linha em branco e é exatamente o que o RFO-G07 quebrava.
+        Distinguir '   ' de ' ' exigiria a ferramenta interpretar o formato do
+        patch, que é a competência que ela não tem e não deve fingir ter.
+
+        Este teste existe para que mudar isso seja uma decisão, não um efeito
+        colateral: se alguém voltar a aparar espaços no fim, ele fala.
+        """
+        d, patch = self.repo_com_patch("a\nb\nc\n\n", "A\nb\nc\n\n")
+
+        # o patch legítimo termina em ' ' (contexto da linha em branco); o
+        # documento acrescenta ruído só-de-espaços depois dele
+        doc = "```diff\n" + patch + "   \n```\n"
+
+        extraido = flowmod.extrai_diff(doc)
+
+        self.assertTrue(extraido.endswith("   \n"),
+                        "a linha só-de-espaços deveria ter sido preservada como "
+                        "conteúdo; fim do extraído: %r" % extraido[-8:])
+        self.assertIn(" \n", extraido,
+                      "a linha de contexto vazia do patch sumiu")
+
 if __name__ == "__main__":
     unittest.main()

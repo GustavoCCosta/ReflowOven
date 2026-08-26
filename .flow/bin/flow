@@ -306,8 +306,8 @@ def arquivos_adicionados(base: str, head: str, dirs: list) -> list:
                        base, head, "--", *dirs))
 
 
-def base_ref() -> str:
-    """A BASE contra a qual `flow mutate` compara.
+def base_ref_opt():
+    """A BASE, ou None se nao der para determinar. Nao mata o processo.
 
     v1 criava a branch `flow-base` porque o codigo circulava como patch dentro de
     documento. Na v2 o PR e um branch de verdade, entao a BASE e o ponto em que
@@ -327,9 +327,25 @@ def base_ref() -> str:
     sha = (p.stdout or "").strip()
     if p.returncode == 0 and sha:
         return sha
-    die("nao consegui determinar a BASE: nao existe a branch " + BR_BASE +
-        " nem merge-base com origin/main.\n"
-        "rode `git fetch origin` e confira se este branch saiu da main.")
+    return None
+
+
+def base_ref() -> str:
+    """A BASE, exigida. So para quem PRECISA dela para agir com seguranca.
+
+    A mutacao apaga arquivo, entao ela nao pode adivinhar a BASE: se nao da para
+    determinar, morre com instrucao. O `--restaurar` NAO usa esta versao — ver o
+    comentario em cmd_mutate. Recuperacao nao pode ter mais pre-condicao do que a
+    operacao que ela desfaz.
+    """
+    base = base_ref_opt()
+    if base is None:
+        die("nao consegui determinar a BASE: nao existe a branch " + BR_BASE +
+            " nem merge-base com origin/main.\n"
+            "rode `git fetch origin` e confira se este branch saiu da main.\n"
+            "para desfazer uma mutacao ja feita, `flow mutate --restaurar` NAO\n"
+            "precisa da BASE e continua funcionando.")
+    return base
 
 
 def cmd_mutate(a):
@@ -342,7 +358,6 @@ def cmd_mutate(a):
         git diff --stat $(git merge-base origin/main HEAD)   # tem que sair VAZIO
     """
     exige_repo()
-    base = base_ref()
     candidatos = a.src or SRC_DIRS_DEFAULT
 
     if a.restaurar:
@@ -354,8 +369,13 @@ def cmd_mutate(a):
         # A mutacao pode ter ressuscitado arquivo num diretorio que so a BASE
         # tem; o pathspec da limpeza precisa alcanca-lo.
         alvos = list(dirs)
-        if git("rev-parse", "--verify", base, check=False).returncode == 0:
-            for d in dirs_na_arvore(candidatos, base):
+        # BASE best-effort, de proposito: aqui ela so ALARGA o pathspec da
+        # limpeza. Exigi-la faria a recuperacao ter mais pre-condicao do que a
+        # mutacao que ela desfaz — e o estado a recuperar e justamente aquele em
+        # que arquivos ja foram apagados. Sem BASE, restaura o que da.
+        base_op = base_ref_opt()
+        if base_op is not None:
+            for d in dirs_na_arvore(candidatos, base_op):
                 if d not in alvos:
                     alvos.append(d)
         git("checkout", "HEAD", "--", *dirs)
@@ -371,6 +391,10 @@ def cmd_mutate(a):
             die("restauracao incompleta; sobrou:\n" + sujo)
         print("codigo-fonte restaurado ao estado do PR.")
         return
+
+    # Daqui para baixo e a MUTACAO, que apaga arquivo. Esta e a operacao que
+    # nao pode adivinhar a BASE: sem ela, morre com instrucao.
+    base = base_ref()
 
     # Sem commit, HEAD == BASE e o `--restaurar` apagaria o trabalho em vez de
     # devolve-lo. Exigir arvore limpa e o que impede essa perda.
