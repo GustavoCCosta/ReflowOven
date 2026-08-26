@@ -10,9 +10,11 @@ reserva ao humano), então este arquivo é medido à mão — e é por isso que 
 mesmo git que o `flow apply` usa, não da minha leitura do formato.
 """
 
+import os
 import importlib.machinery
 import importlib.util
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,6 +134,78 @@ class TestExtraiDiff(unittest.TestCase):
                         "conteúdo; fim do extraído: %r" % extraido[-8:])
         self.assertIn(" \n", extraido,
                       "a linha de contexto vazia do patch sumiu")
+
+
+class TestBaseNaoBloqueiaRestauracao(unittest.TestCase):
+    """RFO-G07: recuperação não pode ter mais pré-condição que a operação.
+
+    `flow mutate` apaga arquivos de código-fonte, então ele exige a BASE e morre
+    alto quando não consegue determiná-la. `flow mutate --restaurar` é o botão de
+    desfazer dessa operação, e o estado que ele existe para recuperar é
+    justamente aquele em que os arquivos já foram apagados — então ele não pode
+    exigir a mesma coisa.
+
+    Um refactor que mexia em outra parte deste mesmo PR quebrou isso: bastou
+    resolver a BASE no topo de cmd_mutate(), antes de olhar `--restaurar`. Foi
+    corrigido, e este é o teste que impede a volta. O invariante estava escrito
+    em prosa em três lugares e prosa não segurou.
+    """
+
+    def repo_sem_origin(self):
+        """Repo com dois commits, árvore limpa, e SEM `origin/main`.
+
+        Sem remote, `git merge-base origin/main HEAD` falha, que é a condição
+        em que base_ref() não tem o que devolver. Dois commits porque a mutação
+        recusa HEAD == BASE.
+        """
+        d = Path(tempfile.mkdtemp())
+        git("init", "--quiet", ".", cwd=d)
+        git("config", "user.email", "t@t", cwd=d)
+        git("config", "user.name", "t", cwd=d)
+        (d / "src").mkdir()
+        (d / "src" / "a.c").write_text("int a;\n", newline="\n")
+        git("add", "-A", cwd=d)
+        git("commit", "--quiet", "-m", "base", cwd=d)
+        (d / "src" / "a.c").write_text("int a; int b;\n", newline="\n")
+        (d / "src" / "novo.c").write_text("int c;\n", newline="\n")
+        git("add", "-A", cwd=d)
+        git("commit", "--quiet", "-m", "patch", cwd=d)
+
+        # pré-condição do teste: a BASE realmente não é determinável
+        p = git("merge-base", "origin/main", "HEAD", cwd=d)
+        self.assertNotEqual(p.returncode, 0,
+                            "este repo não deveria ter origin/main")
+        return d
+
+    def flow(self, d, *args):
+        env = dict(os.environ, REFLOW_DIR=str(d))
+        return subprocess.run([sys.executable, str(FLOW), *args],
+                              capture_output=True, text=True, env=env,
+                              cwd=str(RAIZ))
+
+    def test_restaurar_funciona_sem_base_determinavel(self):
+        d = self.repo_sem_origin()
+
+        p = self.flow(d, "mutate", "--restaurar")
+
+        self.assertEqual(p.returncode, 0,
+                         "o desfazer recusou-se a rodar sem BASE:\n"
+                         + (p.stderr or p.stdout or ""))
+
+    def test_mutar_sem_base_determinavel_morre_alto(self):
+        """O outro lado: a operação que apaga arquivo continua exigindo a BASE.
+
+        Sem este par, o teste acima poderia ser satisfeito afrouxando as duas —
+        que é o oposto do que a issue quer.
+        """
+        d = self.repo_sem_origin()
+
+        p = self.flow(d, "mutate")
+
+        self.assertEqual(p.returncode, 1,
+                         "a mutação rodou sem saber a BASE; ela apaga arquivos")
+        self.assertIn("BASE", p.stderr or "",
+                      "a mensagem de erro não diz que o problema é a BASE")
 
 if __name__ == "__main__":
     unittest.main()
