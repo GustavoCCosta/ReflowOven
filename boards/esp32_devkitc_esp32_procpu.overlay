@@ -13,6 +13,7 @@
  * Check every pin against your own wiring before applying mains power.
  */
 
+#include <zephyr/dt-bindings/display/panel.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 / {
@@ -75,37 +76,58 @@
 		spi-max-frequency = <2000000>;
 		status = "okay";
 	};
+};
 
-	st7789: st7789v@1 {
-		compatible = "sitronix,st7789v";
-		reg = <1>;
-		spi-max-frequency = <20000000>;
-		status = "okay";
-
-		cmd-data-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
+/*
+ * The ST7789 is no longer a direct SPI device: the Zephyr driver moved to the
+ * MIPI DBI API, so the panel hangs off a `zephyr,mipi-dbi-spi` controller that
+ * emulates DBI Mode C over SPI. What used to be the panel's own
+ * `cmd-data-gpios` and `spi-max-frequency` now live as the controller's
+ * `dc-gpios` and the panel's `mipi-max-frequency` (RFO-B35).
+ *
+ * The panel keeps `reg = <1>`: MIPI_DBI_SPI_CONFIG_DT() passes it through as
+ * the SPI slave index, so chip select is still CS1 of spi2 — GPIO5, the second
+ * entry of cs-gpios above. Changing it here silently moves the chip select.
+ */
+/ {
+	mipi_dbi: mipi_dbi {
+		compatible = "zephyr,mipi-dbi-spi";
+		spi-dev = <&spi2>;
+		dc-gpios = <&gpio0 21 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio0 27 GPIO_ACTIVE_LOW>;
+		#address-cells = <1>;
+		#size-cells = <0>;
 
-		width = <320>;
-		height = <240>;
-		x-offset = <0>;
-		y-offset = <0>;
+		st7789: st7789v@1 {
+			compatible = "sitronix,st7789v";
+			reg = <1>;
+			status = "okay";
 
-		/* Landscape (MV set), 16 bpp. */
-		mdac = <0x60>;
-		colmod = <0x55>;
-		lcm = <0x2c>;
-		gctrl = <0x35>;
-		vrhs = <0x0b>;
-		vdvs = <0x20>;
-		vcom = <0x20>;
-		gamma = <0x01>;
+			mipi-max-frequency = <20000000>;
+			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
 
-		porch-param = [0c 0c 00 33 33];
-		cmd2en-param = [5a 69 02 01];
-		pwctrl1-param = [a4 a1];
-		pvgam-param = [d0 00 02 07 0a 28 32 44 42 06 0e 12 14 17];
-		nvgam-param = [d0 00 02 07 0a 28 31 54 47 0e 1c 17 1b 1e];
-		ram-param = [00 f0];
-		rgb-param = [cd 08 14];
+			width = <320>;
+			height = <240>;
+			x-offset = <0>;
+			y-offset = <0>;
+
+			/* Landscape (MV set), 16 bpp. */
+			mdac = <0x60>;
+			pixel-format = <PANEL_PIXEL_FORMAT_RGB_565>;
+			lcm = <0x2c>;
+			gctrl = <0x35>;
+			vrhs = <0x0b>;
+			vdvs = <0x20>;
+			vcom = <0x20>;
+			gamma = <0x01>;
+
+			porch-param = [0c 0c 00 33 33];
+			cmd2en-param = [5a 69 02 01];
+			pwctrl1-param = [a4 a1];
+			pvgam-param = [d0 00 02 07 0a 28 32 44 42 06 0e 12 14 17];
+			nvgam-param = [d0 00 02 07 0a 28 31 54 47 0e 1c 17 1b 1e];
+			ram-param = [00 f0];
+			rgb-param = [cd 08 14];
+		};
 	};
 };

@@ -461,7 +461,7 @@ Toolchain used so far: Zephyr 4.4.99, Zephyr SDK 1.0.1, west 1.5.0.
 | Builds and flashes | `rpi_pico2/rp2350a/m33`, minimal target (core + shell over USB CDC ACM) |
 | Runs on hardware | thermocouple read path: live readings, open-circuit detection, latched fault. Bench validation of the heater output still pending |
 | Verified without hardware | the page, by `node tools/test_page.js`: transport selection, rendering, and picking JSON out of shell noise |
-| Written, never compiled | display UI, encoder, Wi-Fi link, HTTP server, USB Ethernet link, and the whole ESP32 target |
+| Compiles, never run | display UI and encoder, both ESP32 targets, the Wi-Fi link, the HTTP server, and the USB Ethernet link (`-S usb-webui`). Measured on 2026-08-26, one build per target |
 
 Bring-up order that this repo is set up for: `CONFIG_REFLOW_SHELL` only, then the
 display, then the network. The devicetree overlays, the ST7789 panel parameters
