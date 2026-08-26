@@ -3,6 +3,7 @@
 #include <errno.h>
 
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -37,6 +38,78 @@ static void drive(bool on)
 	output_on = on;
 }
 
+/*
+ * Drive the gate low as early as the GPIO driver allows, without waiting for
+ * the control thread.
+ *
+ * Why this exists (RFO-B06): the only thing that used to configure this pin was
+ * reflow_heater_init(), reached from controller_thread, which K_THREAD_DEFINE
+ * starts 100 ms after the kernel. Until then the pin was an input — high
+ * impedance — and an opto-coupled SSR module with a pull-up on its input reads
+ * that as ON. A board stuck in a reset loop would then heat continuously with
+ * no loop running at all.
+ *
+ * Why POST_KERNEL and not PRE_KERNEL_1: the pin cannot be touched before the
+ * GPIO controller exists, and on these targets it does not exist that early.
+ * The RP2350 driver initialises at POST_KERNEL/CONFIG_GPIO_INIT_PRIORITY, the
+ * native_sim emulator likewise; only the ESP32 driver is PRE_KERNEL_1, and even
+ * there it sits at priority 40, so a PRE_KERNEL_1 hook at priority 0 would run
+ * before it and find no device. POST_KERNEL at a numerically later priority is
+ * the earliest level that works on every target, and it still completes before
+ * the kernel starts any application thread.
+ *
+ * What this does NOT fix: the window from power-on reset until this runs. No
+ * software can cover that — the pin is whatever the SoC's reset state makes it.
+ * That window is why the hardware needs a pull-down on the gate; see the
+ * "Safety" section of README.md.
+ */
+/*
+ * The safe-init must run after the GPIO driver. This assertion covers only the
+ * PRIORITY half of that invariant, and cannot cover the other half: the real
+ * rule is "later init level, or same level and later priority". If someone moves
+ * a GPIO driver to a later LEVEL (say APPLICATION) while keeping priority 40,
+ * this stays true and the ordering breaks silently. There is no cheap way to
+ * compare levels in a BUILD_ASSERT, so it is written here instead: whoever
+ * changes an init level has to re-check by hand.
+ */
+BUILD_ASSERT(CONFIG_KERNEL_INIT_PRIORITY_DEVICE > CONFIG_GPIO_INIT_PRIORITY,
+	     "the SSR safe-init must run after the GPIO driver, not before it");
+
+/*
+ * The gate must be wired active-high. GPIO_OUTPUT_INACTIVE below asks the driver
+ * for the logically inactive level; with GPIO_ACTIVE_LOW in the devicetree, that
+ * drives the pin *high* — which is exactly what energises an opto-coupled SSR,
+ * so the fix for RFO-B06 would become the cause of the thing it prevents.
+ *
+ * This lives here, and not in a test, on purpose: DT_GPIO_FLAGS resolves against
+ * the devicetree of whatever is being BUILT, so on a board build it reads the
+ * board overlay. A ztest can only ever see its own simulated overlay, so it
+ * cannot guard the three real targets. Invert the polarity in any board overlay
+ * and this stops the build there.
+ */
+BUILD_ASSERT((DT_GPIO_FLAGS(SSR_NODE, gpios) & GPIO_ACTIVE_LOW) == 0,
+	     "reflow-ssr must be GPIO_ACTIVE_HIGH: with ACTIVE_LOW, "
+	     "GPIO_OUTPUT_INACTIVE drives the gate high and turns the element on");
+
+static int ssr_safe_init(void)
+{
+	int ret;
+
+	if (!gpio_is_ready_dt(&ssr)) {
+		LOG_ERR("SSR gpio not ready at boot; gate left in reset state");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&ssr, GPIO_OUTPUT_INACTIVE);
+	if (ret != 0) {
+		LOG_ERR("SSR gpio configure at boot: %d", ret);
+	}
+
+	return ret;
+}
+
+SYS_INIT(ssr_safe_init, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
+
 int reflow_heater_init(void)
 {
 	int ret;
@@ -46,7 +119,11 @@ int reflow_heater_init(void)
 		return -ENODEV;
 	}
 
-	/* Inactive at reset: never energise the element before the loop runs. */
+	/*
+	 * Redundant with ssr_safe_init() above, deliberately: this is also the
+	 * path that reports a GPIO failure to the controller, which turns it
+	 * into a latched fault instead of a silent boot message.
+	 */
 	ret = gpio_pin_configure_dt(&ssr, GPIO_OUTPUT_INACTIVE);
 	if (ret != 0) {
 		return ret;

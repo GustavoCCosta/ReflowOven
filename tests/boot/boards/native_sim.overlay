@@ -1,0 +1,37 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * SIMULATION ONLY — nothing here describes hardware.
+ *
+ * `tests/boot` is its own Zephyr application, rooted at tests/boot, so it does
+ * NOT see the application's boards/native_sim.overlay. Without this file the
+ * alias 'reflow-ssr' does not exist on native_sim and heater.c stops the build
+ * on its own guard — which would take down the `ztest (native_sim)` job, the one
+ * that measures item 1 of the Definition of Done, the moment #59 is fixed.
+ *
+ * native_sim already provides a GPIO emulator as gpio0, so unlike the qemu_x86
+ * overlay next to this one there is no controller to declare: only the SSR node
+ * and the alias. Pin 15 and GPIO_ACTIVE_HIGH mirror the application's
+ * boards/native_sim.overlay so both build the same shape.
+ *
+ * native_sim does not run on Windows (PROCESSO.md section 10), which is why the
+ * qemu_x86 overlay exists as well. Both platforms build the same source and
+ * assert the same thing; this one is what makes the suite measurable in CI.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	reflow_outputs {
+		compatible = "gpio-leds";
+
+		ssr0: ssr_0 {
+			gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+			label = "SSR heater (emulated)";
+		};
+	};
+
+	aliases {
+		reflow-ssr = &ssr0;
+	};
+};
