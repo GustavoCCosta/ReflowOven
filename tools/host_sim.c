@@ -94,7 +94,17 @@ static struct result simulate(const struct reflow_profile *prof, bool verbose)
 	pid_reset(&pid);
 	reflow_run_start(&run, prof, (int32_t)(sensed * 1000));
 
-	while (r.res == REFLOW_RUN_ACTIVE && t < 3600.0) {
+	/*
+	 * The cut-off comes from the profile, not from a literal: a run may
+	 * legally last nominal + grace for every stage, and a profile longer
+	 * than a hardcoded ceiling could never finish (RFO-G12). This does not
+	 * mask a profile that fails to converge - reflow_run_tick() returns
+	 * REFLOW_RUN_ERR_TIMEOUT at or before this bound, so the run is still
+	 * reported as a failure, just the honest one.
+	 */
+	const double limit_s = reflow_profile_max_ms(prof) / 1000.0;
+
+	while (r.res == REFLOW_RUN_ACTIVE && t < limit_s) {
 		double duty = 0.0;
 		double sp;
 
