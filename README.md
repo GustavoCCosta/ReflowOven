@@ -52,6 +52,7 @@ means flipping the symbol to `n`.
 | `snippets/usb-webui/` | `-S usb-webui`: the overlay and conf for the USB link |
 | `tests/logic/` | ztest suite for the PID and the profile machine |
 | `tests/boot/` | ztest suite for the SSR gate's state at boot, on the GPIO emulator |
+| `tests/controller/` | ztest suite for the control core, against an injectable thermocouple (`src/temp_fake.c` in place of `src/core/temp.c`) |
 | `tools/host_sim.c` | Closed-loop simulation of the same logic on the build host |
 | `tools/test_page.js` | Optional: `node tools/test_page.js` smoke tests the page's transport choice and rendering |
 
@@ -375,15 +376,26 @@ Two Zephyr options you may still need by hand:
 ## Tests
 
 ```sh
-west twister -T tests -p native_sim          # unit tests: PID, profile, and the boot state of the SSR gate
+west twister -T tests -p native_sim          # PID, profile, the boot state of the SSR gate, and the control core
 ```
 
-On Windows `native_sim` is filtered out ("Native platform requires Linux"); both
-suites also run on `qemu_x86`, which is what the process prescribes locally:
+On Windows `native_sim` is filtered out ("Native platform requires Linux"); every
+suite also runs on `qemu_x86`, which is what the process prescribes locally:
 
 ```sh
 west twister -T tests -p qemu_x86 --timeout-multiplier 6
 ```
+
+`tests/controller/` links the whole control path as it is flashed, with one
+substitution: `tests/controller/src/temp_fake.c` provides the `temp.h` contract
+in place of `src/core/temp.c`. On a simulated platform the emulated SPI bus has
+no MAX6675 behind it, so `reflow_temp_init()` fails and the controller latches
+`FAULT_SENSOR` before a run can start; with the fake, the test writes the
+sample. It is deliberately not a Kconfig option -- a shipped image able to read
+a made-up temperature is a foot-gun on a mains heater, so the substitution
+happens at link time, in that suite's `CMakeLists.txt`, and nowhere else. The
+fake still runs the real `tempguard.c` filter over the injected value, so a
+suppressed spike is suppressed there exactly as it would be on hardware.
 
 Closed-loop check with a first-order oven model, no hardware and no Zephyr:
 
