@@ -38,22 +38,42 @@ jobs:
           gcc -std=c99 -Wall -Wextra -Werror -O2 -o /tmp/host_sim \
               tools/host_sim.c src/core/pid.c src/core/profile.c -Isrc/core -lm
 
-      - name: Executar host_sim (informativo — ver RFO-G12)
-        # DECISAO EXPLICITA, no lugar do `|| true` que estava aqui antes: a
-        # execucao roda e o log fica visivel, mas nao derruba o job.
-        #
-        # Motivo, e ele e mensuravel: o perfil "Bake / Dry 200C" (commit a089dad)
-        # soma 200+400+3000+180 = 3780 s de duracao nominal, e host_sim.c:97
-        # limita a corrida a `t < 3600.0`. O simulador nao consegue terminar esse
-        # perfil e devolve 1, com "run did not complete" -- apesar de o controle
-        # rastrear bem (erro rms 0,45 C). E limite da ferramenta, nao defeito do
-        # firmware. Enquanto o RFO-G12 nao fechar, exigir exit 0 aqui deixaria o
-        # job permanentemente vermelho por um motivo falso.
-        #
-        # Quando o G12 fechar, junte este passo ao de cima e deixe o exit code
-        # derrubar o job.
-        continue-on-error: true
+      - name: Executar host_sim
+        # Era `continue-on-error` porque o perfil "Bake / Dry 200C" somava 3780 s
+        # de duracao nominal contra um teto fixo de 3600 s em host_sim.c -- o
+        # simulador nao conseguia terminar e devolvia 1. O RFO-G12 tirou o teto
+        # fixo e a execucao passou a sair com 0, verificado na main (0596fab):
+        #   Bake / Dry 200C  done  peak 200.7 C  rms err 0.45 C  3798 s
+        #   all profiles tracked OK
+        # Entao o exit code volta a derrubar o job, como o comentario antigo
+        # mandava fazer quando o G12 fechasse. RFO-G16.
         run: /tmp/host_sim -v
+
+  ferramental:
+    # A suite de tests/tools e Python: o twister descobre suites por
+    # testcase.yaml e simplesmente nao a ve -- sem erro, sem aviso. Ela cobre
+    # .flow/bin/flow, que carrega o `flow mutate`, que E o mecanismo do item 4
+    # da Definition of Done. Regressao ali enfraquece a verificacao de todo PR
+    # futuro. RFO-G16.
+    name: Suite do ferramental (tests/tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: unittest discover em tests/tools
+        # `unittest discover` numa pasta vazia ou ausente sai com SUCESSO sem
+        # rodar nada -- exatamente o "job que passa por omissao" que deixou o
+        # RFO-G10 escondido desde o primeiro commit. Por isso as duas guardas:
+        # o rc da suite E a contagem de testes executados.
+        run: |
+          set +e
+          saida=$(python -m unittest discover -s tests/tools -v 2>&1); rc=$?
+          set -e
+          printf '%s\n' "$saida"
+          [ "$rc" -eq 0 ] || { echo "::error::a suite de tests/tools falhou"; exit 1; }
+          printf '%s\n' "$saida" | grep -qE '^Ran [1-9][0-9]* test' || {
+            echo "::error::nenhum teste executado em tests/tools (vazia, ausente ou nao descoberta)"
+            exit 1
+          }
 
   ztest:
     name: ztest (native_sim)
@@ -183,12 +203,18 @@ jobs:
         include:
           - nome: pico2-completo-usb
             board: rpi_pico2/rp2350a/m33
+            toolchain: arm-zephyr-eabi
+            overlay: app/overlays/rpi_pico2_display_encoder.overlay
             flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_USB_ECM=y -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
           - nome: pico2-sem-rede
             board: rpi_pico2/rp2350a/m33
+            toolchain: arm-zephyr-eabi
+            overlay: app/overlays/rpi_pico2_display_encoder.overlay
             flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
           - nome: esp32-wifi
             board: esp32_devkitc/esp32/procpu
+            toolchain: xtensa-espressif_esp32_zephyr-elf
+            overlay: ""
             flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_WIFI=y -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=n -DCONFIG_REFLOW_SHELL=y"
     steps:
       - uses: actions/checkout@v4
@@ -210,7 +236,13 @@ jobs:
         # `west sdk install` le a versao do SDK do manifesto: precisa do workspace.
         working-directory: ws
         run: |
-          west sdk install -t arm-zephyr-eabi -t xtensa-espressif_esp32-zephyr-elf
+          # Um toolchain POR COMBO, nao a uniao. `west sdk install` falha
+          # atomicamente, entao o nome invalido de xtensa derrubava tambem a
+          # instalacao do ARM -- os dois combos pico2 falhavam sem precisar de
+          # xtensa nenhum. E o nome estava errado por um caractere: o SDK 1.0.1
+          # traz `xtensa-espressif_esp32_zephyr-elf`, underscore antes de
+          # `zephyr`. Conferido em zephyr-sdk-1.0.1/gnu/. RFO-G15.
+          west sdk install -t ${{ matrix.toolchain }}
 
       - name: Buscar blobs do HAL Espressif
         # O alvo esp32 com REFLOW_NET=y + LINK_WIFI=y nao linka sem os blobs de
@@ -221,10 +253,28 @@ jobs:
 
 
       - name: Build ${{ matrix.nome }} @ ${{ matrix.board }}
+        # Os combos que ligam UI_DISPLAY=y precisam do overlay do painel: a
+        # board nua NAO declara `zephyr,display` por decisao de projeto -- o
+        # README diz que o alvo de bring-up e "control core plus shell only:
+        # no panel", e o painel entra por EXTRA_DTC_OVERLAY_FILE sem tocar
+        # arquivo de board. Sem ele a build morre em
+        # DT_CHOSEN_zephyr_display_ORD undeclared. RFO-B37.
+        #
+        # Caminho ABSOLUTO via $PWD: o passo roda em ws/ e a aplicacao esta
+        # em ws/app, e caminho relativo em EXTRA_DTC_OVERLAY_FILE resolve
+        # contra o diretorio da aplicacao, nao contra o cwd -- ambiguidade
+        # que nao vale arriscar num arquivo que so o humano pode consertar.
         working-directory: ws
         run: |
+          EXTRA=""
+          if [ -n "${{ matrix.overlay }}" ]; then
+            test -f "$PWD/${{ matrix.overlay }}" || {
+              echo "::error::overlay nao encontrado: $PWD/${{ matrix.overlay }}"
+              exit 1; }
+            EXTRA="-DEXTRA_DTC_OVERLAY_FILE=$PWD/${{ matrix.overlay }}"
+          fi
           west build -p always -b ${{ matrix.board }} -d build/${{ matrix.nome }} \
-            app -- ${{ matrix.flags }}
+            app -- $EXTRA ${{ matrix.flags }}
 
   processo:
     # Verifica que o PR respeita o contrato antes de gastar tempo de revisao.
