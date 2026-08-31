@@ -39,9 +39,6 @@ void reflow_temp_fake_set_raw_mc(int32_t raw_mc);
  */
 void reflow_temp_fake_fail(int err);
 
-/* Make reflow_temp_init() return this errno; 0 stops failing. */
-void reflow_temp_fake_fail_init(int err);
-
 /* Number of reflow_temp_read() calls since the last reset. */
 uint32_t reflow_temp_fake_reads(void);
 

@@ -18,7 +18,17 @@
 #include "tempguard.h"
 #include "temp_fake.h"
 
-/* Same window as temp.c. */
+/*
+ * Same window as temp.c, copied rather than shared: the constants are private to
+ * temp.c and hoisting them into temp.h is a production change, out of scope here.
+ *
+ * Say the cost out loud, because no test catches it: widen or narrow the window in
+ * temp.c and this fake keeps the old one, silently. Nothing goes red. Unlike the
+ * spike filter below -- which calls the real tempguard.c precisely so it cannot
+ * drift -- this pair is kept honest by whoever edits temp.c remembering to look
+ * here. If the window ever becomes a decision rather than a sanity check, move it
+ * to tempguard.c and delete these two lines.
+ */
 #define TEMP_MIN_MC (-20000)
 #define TEMP_MAX_MC (400000)
 
@@ -31,7 +41,6 @@ static struct {
 	struct reflow_spike spike;
 	int32_t raw_mc;
 	int read_err;
-	int init_err;
 	uint32_t reads;
 } fake = {
 	.raw_mc = FAKE_IDLE_MC,
@@ -45,7 +54,6 @@ void reflow_temp_fake_reset(void)
 	reflow_spike_reset(&fake.spike);
 	fake.raw_mc = FAKE_IDLE_MC;
 	fake.read_err = 0;
-	fake.init_err = 0;
 	fake.reads = 0;
 
 	/*
@@ -77,14 +85,6 @@ void reflow_temp_fake_fail(int err)
 	k_spin_unlock(&lock, key);
 }
 
-void reflow_temp_fake_fail_init(int err)
-{
-	k_spinlock_key_t key = k_spin_lock(&lock);
-
-	fake.init_err = err;
-	k_spin_unlock(&lock, key);
-}
-
 uint32_t reflow_temp_fake_reads(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
@@ -94,15 +94,22 @@ uint32_t reflow_temp_fake_reads(void)
 	return n;
 }
 
+/*
+ * Always succeeds, and there is no knob to make it fail. The control thread
+ * runs this from K_THREAD_DEFINE at boot, before any ztest body -- and before a
+ * `setup` hook too -- so an injected init failure could never be set in time to
+ * be observed. Covering the no-thermocouple-at-boot path needs the controller to
+ * retry initialisation, which is a production change and belongs to its own
+ * issue, not to a knob here that looks usable and is not.
+ */
 int reflow_temp_init(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
-	int err = fake.init_err;
 
 	reflow_spike_reset(&fake.spike);
 	k_spin_unlock(&lock, key);
 
-	return err;
+	return 0;
 }
 
 int reflow_temp_read(int32_t *temp_mc, int32_t *raw_mc)

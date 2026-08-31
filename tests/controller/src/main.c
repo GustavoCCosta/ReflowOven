@@ -265,4 +265,16 @@ ZTEST(reflow_controller, test_a_cleared_fault_allows_a_new_run)
 		     reflow_state_str(t.state), reflow_fault_str(t.fault));
 }
 
-ZTEST_SUITE(reflow_controller, NULL, NULL, fresh_idle, NULL, NULL);
+/*
+ * Leave the oven stopped, so no test ends with a run still going. fresh_idle()
+ * already normalises the state before each test, so today this changes nothing --
+ * it exists so that adding a shared teardown later does not silently create a
+ * dependency on test order.
+ */
+static void stop_the_oven(void *unused)
+{
+	ARG_UNUSED(unused);
+	post(REFLOW_CMD_STOP, 0);
+}
+
+ZTEST_SUITE(reflow_controller, NULL, NULL, fresh_idle, stop_the_oven, NULL);
