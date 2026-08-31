@@ -70,17 +70,3 @@ enum reflow_spike_result reflow_spike_filter(struct reflow_spike *s, int32_t raw
 	*out_mc = raw_mc;
 	return REFLOW_SPIKE_FORCED;
 }
-
-bool reflow_overtemp_tripped(int32_t filtered_mc, int32_t raw_mc, int32_t limit_mc)
-{
-	/*
-	 * Either reading is enough. raw_mc is the one that matters while the
-	 * spike rejector is suppressing a rise; filtered_mc still counts,
-	 * because a reading latched high is not a reason to re-energise the
-	 * element. The cost of this pair is that a single noise spike above the
-	 * limit now latches FAULT_OVERTEMP instead of being filtered away —
-	 * a stop that needs an explicit clear, which is the safe direction to
-	 * be wrong in.
-	 */
-	return (raw_mc >= limit_mc) || (filtered_mc >= limit_mc);
-}

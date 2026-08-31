@@ -108,8 +108,16 @@ static struct result simulate(const struct reflow_profile *prof, bool verbose)
 		double duty = 0.0;
 		double sp;
 
+		/*
+		 * The same sample twice: this model has no spike rejector, so the
+		 * filtered and the raw reading are the same number. RFO-B34 gave
+		 * reflow_run_tick() both so the profile abort cannot be blinded by
+		 * suppression on the firmware side; here there is nothing to
+		 * suppress, and passing sensed twice keeps this simulation the
+		 * honest best case rather than a different plant.
+		 */
 		r.res = reflow_run_tick(&run, prof, (uint32_t)(DT_S * 1000),
-					(int32_t)(sensed * 1000));
+					(int32_t)(sensed * 1000), (int32_t)(sensed * 1000));
 		if (r.res != REFLOW_RUN_ACTIVE) {
 			break;
 		}

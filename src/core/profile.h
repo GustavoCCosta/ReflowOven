@@ -95,10 +95,22 @@ void reflow_run_start(struct reflow_run *run, const struct reflow_profile *prof,
  * Advance the run by dt_ms using the latest measurement, recomputing
  * run->setpoint_mc. Returns run->result; once it is not ACTIVE the runner
  * latches and further calls are no-ops.
+ *
+ * Two readings, for the same reason reflow_overtemp_tripped() takes two
+ * (RFO-B34). temp_mc is the spike-filtered value and drives the setpoint and
+ * the stage machine; raw_mc is the sample as it came off the chip, and the
+ * profile abort level is judged against both. With only the filtered one there
+ * is a window - up to REFLOW_SPIKE_MAX_REJECTS - 1 samples - in which a real
+ * rise past prof->abort_mc but below the absolute cut-out is seen by neither
+ * barrier: the profile one because it reads a suppressed value, the absolute
+ * one because the temperature is genuinely below it.
+ *
+ * A caller with no spike filter passes the same value twice; that is the
+ * pre-RFO-B34 behaviour and it stays correct.
  */
 enum reflow_run_result reflow_run_tick(struct reflow_run *run,
 				       const struct reflow_profile *prof,
-				       uint32_t dt_ms, int32_t temp_mc);
+				       uint32_t dt_ms, int32_t temp_mc, int32_t raw_mc);
 
 /* True when the heater must be forced off for the current stage. */
 bool reflow_run_heater_allowed(const struct reflow_run *run,
