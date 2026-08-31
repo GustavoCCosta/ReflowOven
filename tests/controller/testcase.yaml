@@ -1,0 +1,9 @@
+tests:
+  reflow.controller:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags: reflow controller temp seguranca
+    # Every assertion waits on the 250 ms sampling cadence of the real control
+    # thread, so the suite is dominated by sleeping, not by computing.
+    timeout: 120
