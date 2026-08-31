@@ -28,11 +28,46 @@ LOG_MODULE_REGISTER(reflow_display, CONFIG_REFLOW_LOG_LEVEL);
 #define UI_HANDLER()       lv_task_handler()
 #endif
 
+/*
+ * This feature needs a panel described in the devicetree, and it is the
+ * devicetree - not this file - that decides whether one exists. Without the
+ * guard, DEVICE_DT_GET(DT_CHOSEN(zephyr_display)) below expands to an undeclared
+ * __device_dts_ord_DT_CHOSEN_zephyr_display_ORD, and the build dies forty lines
+ * deep inside device.h with no hint of what to do about it (RFO-B36). The bare
+ * rpi_pico2 target is the case that hits this: README.md declares it as the
+ * bring-up target without a panel, so the panel lives in an overlay that has to
+ * be asked for.
+ *
+ * Compile time and not runtime on purpose: a build with the feature on and no
+ * panel must not produce a binary at all.
+ */
+#if !DT_HAS_CHOSEN(zephyr_display)
+#error "CONFIG_REFLOW_UI_DISPLAY needs a 'zephyr,display' chosen node: add one with \
+-DEXTRA_DTC_OVERLAY_FILE=overlays/<board>_display_encoder.overlay, or set \
+CONFIG_REFLOW_UI_DISPLAY=n (see 'Targets and wiring' in README.md)"
+#endif
+
 ZBUS_SUBSCRIBER_DEFINE(reflow_display_sub, 4);
 ZBUS_CHAN_ADD_OBS(reflow_telemetry_chan, reflow_display_sub, 3);
 
 static const struct device *const display_dev =
+#if DT_HAS_CHOSEN(zephyr_display)
 	DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+#else
+	/*
+	 * Unreachable: the #error above has already failed the build. This arm
+	 * exists so that it is the ONLY diagnostic - #error does not stop the
+	 * preprocessor, so without it DEVICE_DT_GET() still expands against a
+	 * node that is not there and buries the message under the forty lines of
+	 * device.h macro noise this change exists to replace.
+	 *
+	 * This arm and that #error are ONE unit: delete the #error and this NULL
+	 * becomes a build that succeeds and hands the display thread a null
+	 * device. Neither half is safe alone, which is why both live in the same
+	 * #if family and why this comment says so.
+	 */
+	NULL;
+#endif
 
 static lv_obj_t *lbl_profile;
 static lv_obj_t *lbl_temp;
