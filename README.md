@@ -441,7 +441,7 @@ end of the supported range.
 
 | Oven property | `host_sim` knob | Supported | Where it was measured |
 | --- | --- | --- | --- |
-| Cool-down time constant, door shut | `KLOSS` (= 1/tau) | tau up to **800 s** | 800 s with 20 s of sensor lag: all four profiles `done`. At 900 s the SAC305 cool stage runs out of budget (`TIMEOUT` at 2250 s) |
+| Cool-down time constant, door shut | `KLOSS` (= 1/tau) | tau up to **800 s** | `TAU=20 KLOSS=0.00125`: all four profiles `done`. At 900 s (`KLOSS=0.001111`) the SAC305 cool stage runs out of budget from 10 s of lag upwards (`TIMEOUT` at 2250 s); with only 4 s of lag that same 900 s oven still finishes, at 2246 s. The limit tightens as lag grows, which is why the pair is quoted together |
 | Sensor + thermal-mass lag | `TAU` | up to **10 s** | `TAU=10 KLOSS=0.00125`: all four `done`, SAC305 peak 253.6 degC against its 260 degC abort level, 6.4 degC of margin, tracking error 4.6 degC rms |
 
 A toaster oven with the door closed has a cool-down time constant of 200-600 s,
@@ -453,15 +453,25 @@ report that rise inside the window whatever the controller does. Keep the
 thermocouple bead bare and in the air - a sheathed probe strapped to a lump of
 metal is how you leave the supported range without noticing.
 
-**Outside it the firmware degrades by stopping, not by improvising.** What the
-operator sees, all measured at the same `KLOSS=0.00125` corner:
+**Outside it the firmware degrades by stopping, not by improvising.** Every row
+below names the point it was measured at: these thresholds move with the other
+parameter, and none of them reproduces at the `host_sim` defaults.
 
 | Condition | What happens | On screen |
 | --- | --- | --- |
-| Sensor lag 10-20 s | the run still completes, but the SAC305 peak climbs from 253.6 to 258.5 degC: the margin to its own abort level falls from 6.4 degC to 1.5 degC | nothing unusual - this is the band to distrust, and the reason the limit is written down instead of being left to chance |
-| Sensor lag 25 s and up | the SAC305 peak reaches the profile's abort level during the ramp (`Sn63Pb37` follows at 30 s, the 120 degC bake at 45 s) | `FAULT_OVERTEMP`, SSR cut, latched until `reflow clear` |
-| Sensor lag around 300 s | a heating stage never reaches target inside nominal + grace | `FAULT_TIMEOUT`, SSR cut, latched until `reflow clear` |
-| Cool-down time constant above ~800 s | the cooling stage exceeds `REFLOW_COOL_GRACE_MS` | `FAULT_TIMEOUT` with the element already off; read it as "the sensor is stuck above the target, or something is still delivering heat" |
+| Sensor lag 10-20 s, at `KLOSS=0.00125` | the run still completes, but the SAC305 peak climbs from 253.6 to 258.5 degC: the margin to its own abort level falls from 6.4 degC to 1.5 degC | nothing unusual - this is the band to distrust, and the reason the limit is written down instead of being left to chance |
+| Sensor lag 25 s and up, at `KLOSS=0.00125` | the SAC305 peak reaches the profile's abort level during the ramp (`Sn63Pb37` follows at 30 s, the 120 degC bake at 45 s). **Only near the slow-cooling end:** the same 25 s of lag on a fast-cooling oven (`KLOSS=0.010`, the `host_sim` default) still finishes, peaking at 254.8 degC, and 30 s of lag there peaks at 255.8 degC | `FAULT_OVERTEMP`, SSR cut, latched until `reflow clear` |
+| Sensor lag around 300 s, any cooling rate | a heating stage never reaches target inside nominal + grace - the reading is still near ambient when the budget runs out | `FAULT_TIMEOUT`, SSR cut, latched until `reflow clear` |
+| Cool-down time constant above ~800 s, at 10 s of lag or more | the cooling stage exceeds `REFLOW_COOL_GRACE_MS`. With less lag the same oven still fits: at `TAU=4` a 900 s cool-down finishes in 2246 s | `FAULT_TIMEOUT` with the element already off; read it as "the sensor is stuck above the target, or something is still delivering heat" |
+
+This envelope is the range in which **the model** closes, and nothing more. It says
+nothing about the dead time of a real SSR nor about temperature stratification
+inside the chamber; confirming it on a real oven is bench work. One interaction
+worth knowing while reading the margins above: `host_sim` has no spike filter, and
+in the firmware the profile's `abort_mc` is compared against the filtered reading.
+On a smooth ramp the filter passes everything through and the numbers hold, so this
+does not invalidate the 6.4 degC of margin - it does mean the real margin depends on
+RFO-B34 being fixed.
 
 Both failure modes end with the element off and a fault that has to be cleared by
 hand. What the firmware deliberately does *not* do is widen `grace_ms` until the
