@@ -179,6 +179,24 @@ enum reflow_cmd_parse reflow_cmd_parse(const char *query, struct reflow_cmd *cmd
 		return REFLOW_CMD_PARSE_REJECT;
 	}
 
+	/*
+	 * Range-check the profile index here, and not where arg is parsed, for
+	 * two reasons. The query is order-independent, so at parse time we may
+	 * not know yet which command the arg belongs to - and marking a bad arg
+	 * malformed regardless of the command would drag "id=stop&arg=999" into
+	 * the malformed path. It would still stop the oven, but the point of
+	 * REJECT_STOP is that it is reached deliberately, not by accident.
+	 *
+	 * The count comes from profile.c, which is pure and already linked
+	 * wherever this file is. Taking the limit as a parameter instead would
+	 * push the decision back into httpd.c - out of the layer that exists to
+	 * hold exactly this kind of decision (RFO-B10).
+	 */
+	if (id == REFLOW_CMD_SELECT_PROFILE && have_arg &&
+	    (arg < 0 || arg >= (int32_t)reflow_profile_count())) {
+		malformed = true;
+	}
+
 	if (ambiguous || malformed) {
 		/*
 		 * The request is not a command. If a stop was one of the

@@ -6,6 +6,7 @@
  * Run with:  west twister -T tests -p native_sim
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/ztest.h>
@@ -583,6 +584,89 @@ ZTEST(reflow_cmdparse, test_profile_argument)
 		      "a non numeric arg is malformed");
 	zassert_equal(parse("id=profile&arg=1&arg=2", &cmd), REFLOW_CMD_PARSE_REJECT,
 		      "a repeated arg is ambiguous");
+}
+
+/*
+ * RFO-B10. reflow_cmd_parse() aceitava qualquer indice ate 0xFFFF e o mandava
+ * para o nucleo, que faz reflow_profile_get((uint8_t)cmd->arg): arg=256 truncava
+ * para 0 e SELECIONAVA o perfil 0 — o SAC305, que vai a 245 degC — enquanto a API
+ * respondia 204. Uma placa que devia rodar o bake de 120 degC rodava o perfil de
+ * solda, com a UI mostrando o pedido como aceito.
+ */
+ZTEST(reflow_cmdparse, test_indice_de_perfil_fora_da_faixa_e_recusado)
+{
+	static const char *const queries[] = {
+		"id=profile&arg=7",       /* acima da contagem, sem truncar */
+		"id=profile&arg=256",     /* trunca para 0 em uint8_t: o caso do ticket */
+		"id=profile&arg=65535",   /* o teto que o parse_index ja aceitava */
+	};
+	struct reflow_cmd cmd;
+
+	/* Se a tabela crescer ate 7 perfis, o primeiro caso deixa de ser fora da
+	 * faixa e o teste passaria sem exercitar nada. */
+	zassert_true(reflow_profile_count() <= 7,
+		     "esta tabela tem %u perfis: revise os indices deste teste",
+		     reflow_profile_count());
+
+	for (size_t i = 0; i < ARRAY_SIZE(queries); i++) {
+		cmd.id = 0xFF;
+		cmd.arg = -12345;
+		zassert_equal(reflow_cmd_parse(queries[i], &cmd),
+			      REFLOW_CMD_PARSE_REJECT,
+			      "%s foi aceito", queries[i]);
+	}
+}
+
+/* O sinal de menos nao e digito, entao ja era recusado. Ninguem guardava isso. */
+ZTEST(reflow_cmdparse, test_indice_negativo_continua_recusado)
+{
+	struct reflow_cmd cmd;
+
+	zassert_equal(reflow_cmd_parse("id=profile&arg=-1", &cmd),
+		      REFLOW_CMD_PARSE_REJECT, "arg=-1 foi aceito");
+}
+
+/* Toda a faixa valida continua passando: o patch recusa, nao aperta demais. */
+ZTEST(reflow_cmdparse, test_todo_indice_valido_continua_aceito)
+{
+	struct reflow_cmd cmd;
+
+	for (uint8_t i = 0; i < reflow_profile_count(); i++) {
+		char q[32];
+
+		(void)snprintf(q, sizeof(q), "id=profile&arg=%u", i);
+		cmd.arg = -1;
+		zassert_equal(reflow_cmd_parse(q, &cmd), REFLOW_CMD_PARSE_OK,
+			      "%s foi recusado", q);
+		zassert_equal(cmd.arg, i, "%s virou arg=%d", q, cmd.arg);
+		zassert_equal(cmd.id, REFLOW_CMD_SELECT_PROFILE, NULL);
+	}
+}
+
+/*
+ * O item que o Gerente marcou como "onde isso se perde por descuido": recusar um
+ * stop e a unica falha que este endpoint nao pode ter, e um patch de validacao e
+ * exatamente o lugar onde ela aparece.
+ */
+ZTEST(reflow_cmdparse, test_validacao_nao_engole_um_stop)
+{
+	struct reflow_cmd cmd;
+
+	/* Ambigua E com indice fora da faixa: ainda tem de parar o forno. */
+	cmd.id = 0xFF;
+	zassert_equal(reflow_cmd_parse("id=stop&id=profile&arg=256", &cmd),
+		      REFLOW_CMD_PARSE_REJECT_STOP,
+		      "um stop foi engolido pela validacao de faixa");
+	zassert_equal(cmd.id, REFLOW_CMD_STOP, "o comando devolvido nao e um stop");
+
+	/* E um stop simples com um arg fora de faixa pendurado nao vira malformado:
+	 * o arg nao e dele. */
+	cmd.id = 0xFF;
+	zassert_equal(reflow_cmd_parse("id=stop&arg=256", &cmd),
+		      REFLOW_CMD_PARSE_OK,
+		      "um arg que nao pertence ao comando o tornou invalido");
+	zassert_equal(cmd.id, REFLOW_CMD_STOP, NULL);
+	zassert_equal(cmd.arg, 0, "arg deveria ser zerado para um stop");
 }
 
 ZTEST_SUITE(reflow_cmdparse, NULL, NULL, NULL, NULL, NULL);

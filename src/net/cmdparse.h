@@ -25,6 +25,16 @@ enum reflow_cmd_parse {
 	REFLOW_CMD_PARSE_REJECT_STOP,
 };
 
+/*
+ * Parse the query of POST /api/cmd.
+ *
+ * A profile index outside 0..reflow_profile_count()-1 is REJECTed, not
+ * clamped and not passed on (RFO-B10). It used to travel to the core, where
+ * reflow_profile_get((uint8_t)cmd->arg) truncated it: arg=256 became profile 0
+ * - the lead-free profile that goes to 245 degC - and the API answered 204, so
+ * a board meant for the 120 degC bake ran the soldering profile with the UI
+ * showing the request as accepted.
+ */
 enum reflow_cmd_parse reflow_cmd_parse(const char *query, struct reflow_cmd *cmd);
 
 #endif /* REFLOW_NET_CMDPARSE_H_ */
