@@ -15,6 +15,7 @@
 #include "net/cmdparse.h"
 #include "net/httpgate.h"
 #include "net/profiles_json.h"
+#include "net/sendbudget.h"
 #include "tempguard.h"
 
 /* ------------------------------------------------------------------ PID */
@@ -1243,3 +1244,117 @@ ZTEST(reflow_profiles_json, test_every_buffer_size_is_safe)
 }
 
 ZTEST_SUITE(reflow_profiles_json, NULL, NULL, NULL, NULL, NULL);
+
+/* --------------------------------------------------------- sendbudget */
+
+/*
+ * RFO-B07. httpd.c has one thread and called zsock_send() on a blocking socket.
+ * A client that asks for the 6 KB page and never reads it fills the TCP send
+ * buffer, send_all() parks, the thread never returns to zsock_poll(), and the
+ * event stream dies for EVERY client - with the remote Stop button along with
+ * it, while the oven is at 245 degC.
+ *
+ * What the budget decides is not "is this socket writable" - that is the
+ * socket's job - but "has this client gone long enough without accepting a byte
+ * that we should give up on it". That is a function of two instants, so it is
+ * tested here instead of on a network.
+ */
+
+#define BUDGET_MS 500
+
+ZTEST(reflow_sendbudget, test_a_client_that_keeps_reading_is_never_dropped)
+{
+	struct reflow_send_budget b;
+	int64_t now = 1000;
+
+	reflow_send_budget_start(&b, now, BUDGET_MS);
+
+	/*
+	 * Slow but alive: a byte every 400 ms for a minute. Total time on the
+	 * connection is 120x the budget, and it must survive every check -
+	 * the budget measures silence, not duration.
+	 */
+	for (int i = 0; i < 150; i++) {
+		now += 400;
+		zassert_false(reflow_send_budget_expired(&b, now),
+			      "dropped a client that was still accepting bytes, at %lld ms",
+			      (long long)now);
+		reflow_send_budget_progress(&b, now);
+	}
+}
+
+ZTEST(reflow_sendbudget, test_a_client_that_stops_reading_is_dropped)
+{
+	struct reflow_send_budget b;
+
+	reflow_send_budget_start(&b, 1000, BUDGET_MS);
+
+	zassert_false(reflow_send_budget_expired(&b, 1000), "expired immediately");
+	zassert_false(reflow_send_budget_expired(&b, 1000 + BUDGET_MS),
+		      "expired at the budget: the last allowed instant must survive");
+	zassert_true(reflow_send_budget_expired(&b, 1000 + BUDGET_MS + 1),
+		     "a silent client was not dropped one ms past the budget");
+}
+
+/*
+ * The second item of the acceptance criteria, and the one a careless fix gets
+ * wrong: a legitimate event stream sits open for hours sending nothing. It must
+ * be impossible for this path to close it.
+ */
+ZTEST(reflow_sendbudget, test_an_idle_stream_is_never_dropped)
+{
+	struct reflow_send_budget b;
+
+	reflow_send_budget_start(&b, 1000, BUDGET_MS);
+	reflow_send_budget_done(&b);
+
+	/* A whole day later, with no send in progress. */
+	zassert_false(reflow_send_budget_expired(&b, 1000 + 86400000LL),
+		      "an idle event stream was closed by the send deadline");
+}
+
+ZTEST(reflow_sendbudget, test_progress_restarts_the_clock)
+{
+	struct reflow_send_budget b;
+
+	reflow_send_budget_start(&b, 0, BUDGET_MS);
+
+	/* Almost out of time, then one byte moves. */
+	zassert_false(reflow_send_budget_expired(&b, BUDGET_MS), NULL);
+	reflow_send_budget_progress(&b, BUDGET_MS);
+
+	/* The clock restarted: the old deadline no longer applies. */
+	zassert_false(reflow_send_budget_expired(&b, BUDGET_MS + BUDGET_MS),
+		      "progress did not restart the no-progress clock");
+	zassert_true(reflow_send_budget_expired(&b, BUDGET_MS + BUDGET_MS + 1),
+		     "the restarted clock never expires");
+}
+
+ZTEST(reflow_sendbudget, test_a_disabled_budget_never_expires)
+{
+	struct reflow_send_budget b;
+
+	reflow_send_budget_start(&b, 0, 0);
+	zassert_false(reflow_send_budget_expired(&b, 86400000LL),
+		      "a budget of 0 must mean no deadline, not an instant one");
+
+	reflow_send_budget_start(&b, 0, -1);
+	zassert_false(reflow_send_budget_expired(&b, 86400000LL),
+		      "a negative budget must not arm the deadline");
+}
+
+/*
+ * A clock that goes backwards must not look like elapsed time. Keeping a client
+ * one round too long is a slow page; dropping one wrongly is a browser that
+ * loses the oven's telemetry.
+ */
+ZTEST(reflow_sendbudget, test_a_clock_that_goes_backwards_keeps_the_client)
+{
+	struct reflow_send_budget b;
+
+	reflow_send_budget_start(&b, 100000, BUDGET_MS);
+	zassert_false(reflow_send_budget_expired(&b, 0),
+		      "time going backwards was read as the budget being spent");
+}
+
+ZTEST_SUITE(reflow_sendbudget, NULL, NULL, NULL, NULL, NULL);

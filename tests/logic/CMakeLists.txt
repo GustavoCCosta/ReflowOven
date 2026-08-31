@@ -15,5 +15,6 @@ target_sources(app PRIVATE
   ${SRC}/net/cmdparse.c
   ${SRC}/net/httpgate.c
   ${SRC}/net/profiles_json.c
+  ${SRC}/net/sendbudget.c
 )
 target_include_directories(app PRIVATE ${CORE} ${SRC})
