@@ -235,6 +235,104 @@ ZTEST(reflow_profile, test_full_run_completes)
 	zassert_true(temp <= 50000, "finished above the cool-down target: %d", temp);
 }
 
+/*
+ * RFO-B04, com o modelo de resfriamento que o RFO-B32 (#30) pediu.
+ *
+ * test_full_run_completes acima esfria a 1500 mC por tique de 250 ms -- 6 degC/s
+ * constantes, taxa que nenhum forno passivo tem -- e por isso nunca viu este
+ * defeito. Aqui o resfriamento e Newtoniano: cada tique perde uma fracao de
+ * (T - ambiente) dada pela constante de tempo termica do forno. Com tau = 300 s,
+ * dentro da faixa de 200 a 600 s de uma torradeira com a porta fechada, cair de
+ * 245 degC para 50 degC leva ~650 s. O orcamento antigo do estagio 'cool' era
+ * nominal 180 s + grace 60 s = 240 s, e a corrida terminava em FAULT_TIMEOUT
+ * depois de soldar a placa corretamente.
+ *
+ * Usa o perfil embutido de verdade, nao test_prof: o defeito esta nos numeros
+ * dos perfis que o firmware entrega.
+ */
+#define OVEN_TAU_MS 300000U
+#define AMBIENT_MC  25000
+
+ZTEST(reflow_profile, test_resfriamento_passivo_realista_nao_e_falta)
+{
+	const struct reflow_profile *p = reflow_profile_get(0);
+	const uint32_t dt_ms = 250;
+	struct reflow_run run;
+	int32_t temp = AMBIENT_MC;
+	enum reflow_run_result res = REFLOW_RUN_ACTIVE;
+	uint32_t elapsed_ms = 0;
+	uint32_t limit_ms;
+
+	zassert_not_null(p, "perfil 0 nao existe");
+	zassert_equal(p->stages[p->n_stages - 1].kind, REFLOW_STAGE_COOL,
+		      "este teste assume que o perfil termina esfriando");
+
+	limit_ms = reflow_profile_max_ms(p);
+	reflow_run_start(&run, p, temp);
+
+	while (res == REFLOW_RUN_ACTIVE && elapsed_ms <= limit_ms) {
+		if (reflow_run_heater_allowed(&run, p)) {
+			/* Forno aquecido: segue o setpoint com atraso curto. */
+			temp += (run.setpoint_mc - temp) / 8;
+		} else {
+			/* Resfriamento passivo, primeira ordem, sem aquecedor. */
+			temp -= (int32_t)(((int64_t)(temp - AMBIENT_MC) * dt_ms) /
+					  OVEN_TAU_MS);
+		}
+		res = reflow_run_tick(&run, p, dt_ms, temp);
+		elapsed_ms += dt_ms;
+	}
+
+	/*
+	 * A assercao que fica vermelha sem o patch: REFLOW_RUN_ERR_TIMEOUT no
+	 * ultimo estagio, com a placa ja soldada e o aquecedor desligado desde
+	 * o inicio do resfriamento.
+	 */
+	zassert_equal(res, REFLOW_RUN_DONE,
+		      "corrida terminou em %d no estagio %u (%s) apos %u ms: "
+		      "resfriamento passivo com tau=%u ms nao e falta",
+		      res, run.stage, p->stages[run.stage].name, elapsed_ms,
+		      OVEN_TAU_MS);
+	zassert_true(temp <= p->stages[p->n_stages - 1].target_mc,
+		     "terminou acima do alvo de resfriamento: %d mC", temp);
+	zassert_true(temp > AMBIENT_MC - 1000,
+		     "o modelo esfriou abaixo do ambiente: %d mC", temp);
+}
+
+/*
+ * O outro lado da mesma moeda: o orcamento maior e do estagio de resfriamento e
+ * de mais nenhum. Um estagio de aquecimento que estoura continua sendo falta, e
+ * tem de ser -- ali o elemento esta ligado e a placa esta sendo cozida a uma
+ * temperatura desconhecida. Sem esta, "consertar" o RFO-B04 aumentando
+ * grace_ms passaria.
+ */
+ZTEST(reflow_profile, test_estagio_de_aquecimento_continua_com_a_graca_curta)
+{
+	const struct reflow_profile *p = reflow_profile_get(0);
+	const struct reflow_stage *st = &p->stages[0];
+	const uint32_t dt_ms = 250;
+	struct reflow_run run;
+	enum reflow_run_result res = REFLOW_RUN_ACTIVE;
+	uint32_t elapsed_ms = 0;
+
+	zassert_true(st->kind != REFLOW_STAGE_COOL, "estagio 0 deveria aquecer");
+
+	reflow_run_start(&run, p, AMBIENT_MC);
+
+	/* Forno morto: nunca sai do ambiente. */
+	while (res == REFLOW_RUN_ACTIVE && elapsed_ms <= REFLOW_COOL_GRACE_MS) {
+		res = reflow_run_tick(&run, p, dt_ms, AMBIENT_MC);
+		elapsed_ms += dt_ms;
+	}
+
+	zassert_equal(res, REFLOW_RUN_ERR_TIMEOUT,
+		      "estagio de aquecimento parado nao virou falta (res=%d)", res);
+	zassert_true(elapsed_ms <= st->nominal_ms + p->grace_ms + dt_ms,
+		      "falta saiu em %u ms, depois do nominal %u + graca %u: o "
+		      "orcamento do resfriamento vazou para o aquecimento",
+		      elapsed_ms, st->nominal_ms, p->grace_ms);
+}
+
 ZTEST(reflow_profile, test_nominal_duration)
 {
 	zassert_equal(reflow_profile_nominal_ms(&test_prof), 40000,
@@ -262,11 +360,21 @@ ZTEST(reflow_profile, test_max_ms_cobre_a_duracao_de_todo_perfil_embutido)
 			     i, p->name, teto, nominal);
 
 		/* O teto e exatamente o ponto em que a maquina de estados ja
-		 * declarou timeout: nominal mais a graca de cada estagio.
+		 * declarou timeout: nominal mais a graca de cada estagio. A
+		 * graca de um estagio de resfriamento e REFLOW_COOL_GRACE_MS e
+		 * nao grace_ms (RFO-B04), entao a soma esperada e por estagio.
 		 */
-		zassert_equal(teto, nominal + (uint32_t)p->n_stages * p->grace_ms,
-			      "perfil %u (%s): teto %u nao e nominal + n*graca",
-			      i, p->name, teto);
+		uint32_t esperado = nominal;
+
+		for (uint8_t s = 0; s < p->n_stages; s++) {
+			esperado += p->stages[s].kind == REFLOW_STAGE_COOL ?
+				REFLOW_COOL_GRACE_MS : p->grace_ms;
+		}
+
+		zassert_equal(teto, esperado,
+			      "perfil %u (%s): teto %u nao e nominal + a graca de "
+			      "cada estagio (esperado %u)",
+			      i, p->name, teto, esperado);
 	}
 	zassert_true(i >= 4, "esperava ao menos 4 perfis embutidos, vi %u", i);
 }

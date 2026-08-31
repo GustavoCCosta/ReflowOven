@@ -81,13 +81,27 @@ uint32_t reflow_profile_nominal_ms(const struct reflow_profile *prof)
 	return total;
 }
 
+/*
+ * The overrun a stage is allowed before reflow_run_tick() calls it a timeout.
+ * Cooling is passive with the element off, so it gets its own, much larger
+ * budget; see REFLOW_COOL_GRACE_MS in profile.h for why the two differ.
+ */
+static uint32_t stage_grace_ms(const struct reflow_stage *st,
+			       const struct reflow_profile *prof)
+{
+	return st->kind == REFLOW_STAGE_COOL ? REFLOW_COOL_GRACE_MS : prof->grace_ms;
+}
+
 uint32_t reflow_profile_max_ms(const struct reflow_profile *prof)
 {
 	/*
 	 * The longest a run can legally last: every stage takes its nominal
 	 * time plus the whole grace period before reflow_run_tick() calls it a
 	 * REFLOW_RUN_ERR_TIMEOUT. grace_ms is per profile, not per stage, so it
-	 * counts once per stage.
+	 * counts once per stage -- except for a cooling stage, which is allowed
+	 * REFLOW_COOL_GRACE_MS instead (RFO-B04). Reading the budget from the
+	 * same helper reflow_run_tick() uses is what keeps this a bound rather
+	 * than a second opinion.
 	 *
 	 * This is the bound a simulation or a bench harness should use as its
 	 * cut-off, instead of a literal (RFO-G12: host_sim had 3600 s hardcoded
@@ -99,7 +113,7 @@ uint32_t reflow_profile_max_ms(const struct reflow_profile *prof)
 	uint32_t total = reflow_profile_nominal_ms(prof);
 
 	for (uint8_t i = 0; i < prof->n_stages; i++) {
-		total += prof->grace_ms;
+		total += stage_grace_ms(&prof->stages[i], prof);
 	}
 	return total;
 }
@@ -195,7 +209,7 @@ enum reflow_run_result reflow_run_tick(struct reflow_run *run,
 		run->stage_ms = 0;
 		run->stage_start_mc = temp_mc;
 		st = &prof->stages[run->stage];
-	} else if (run->stage_ms > st->nominal_ms + prof->grace_ms) {
+	} else if (run->stage_ms > st->nominal_ms + stage_grace_ms(st, prof)) {
 		/* Oven cannot follow the profile: stop instead of cooking on. */
 		run->result = REFLOW_RUN_ERR_TIMEOUT;
 		return run->result;
