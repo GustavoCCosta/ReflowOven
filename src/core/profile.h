@@ -16,6 +16,30 @@
 
 #define REFLOW_MAX_STAGES 8
 
+/*
+ * How long a COOLING stage may overrun its nominal time before the run is
+ * called a timeout. Deliberately separate from grace_ms, and two orders of
+ * magnitude larger (RFO-B04).
+ *
+ * The two cases are not the same failure. A heating stage that overruns means
+ * the oven is being driven and is not following the profile: the element is on,
+ * the board is being cooked to an unknown temperature, and stopping quickly is
+ * the whole point of grace_ms. A cooling stage that overruns means a passive
+ * oven is cooling slower than the profile guessed. The heater has been off
+ * since the stage began -- reflow_run_heater_allowed() forces it off, and the
+ * absolute backstop still runs every tick -- so nothing is at risk, and the
+ * old behaviour latched FAULT_TIMEOUT at the end of every otherwise perfect
+ * run. Nominal 180 s plus 60 s of grace only closes if the oven's thermal time
+ * constant is under ~112 s; a toaster oven with the door shut is 200-600 s.
+ *
+ * Why a bound at all instead of waiting forever: 30 minutes covers a passive
+ * cool-down from 245 degC to 50 degC for a thermal time constant up to ~800 s,
+ * which is past the far end of that range. Beyond it something is wrong that
+ * the operator has to see -- a sensor reading stuck above the target, or an
+ * element still delivering heat -- and a run that never ends would hide it.
+ */
+#define REFLOW_COOL_GRACE_MS 1800000U
+
 enum reflow_stage_kind {
 	/* Drive the setpoint linearly from the entry temperature to target. */
 	REFLOW_STAGE_RAMP,
@@ -40,7 +64,10 @@ struct reflow_profile {
 	int32_t abort_mc;
 	/* How close to target counts as "reached". */
 	int32_t tol_mc;
-	/* Extra time a stage may take beyond nominal_ms before it is a fault. */
+	/*
+	 * Extra time a HEATING stage may take beyond nominal_ms before it is a
+	 * fault. A cooling stage gets REFLOW_COOL_GRACE_MS instead; see below.
+	 */
 	uint32_t grace_ms;
 };
 

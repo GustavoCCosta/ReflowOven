@@ -425,6 +425,50 @@ and move the winning values into `Kconfig`.
 Profiles built in: SAC305 lead-free, Sn63Pb37 leaded, and a 120 degC bake. They
 live in `src/core/profile.c` as plain tables.
 
+### What oven this controls, with numbers (RFO-B04)
+
+The built-in profiles are not universal. Two properties of the oven decide
+whether they can be followed at all, and both were measured with
+`tools/host_sim.c`, which runs the shipped `pid.c` and `profile.c` against a
+first-order oven model. Reproduce any row with the environment variables named
+next to it.
+
+The two limits interact, so they were measured **together, at the worst corner**
+rather than one at a time: a slow-cooling oven keeps rising after the element
+cuts, so the peak grows, and sensor lag also eats into the cool-down budget.
+Every number below is taken at `KLOSS=0.00125` (cool-down tau 800 s), the slow
+end of the supported range.
+
+| Oven property | `host_sim` knob | Supported | Where it was measured |
+| --- | --- | --- | --- |
+| Cool-down time constant, door shut | `KLOSS` (= 1/tau) | tau up to **800 s** | 800 s with 20 s of sensor lag: all four profiles `done`. At 900 s the SAC305 cool stage runs out of budget (`TIMEOUT` at 2250 s) |
+| Sensor + thermal-mass lag | `TAU` | up to **10 s** | `TAU=10 KLOSS=0.00125`: all four `done`, SAC305 peak 253.6 degC against its 260 degC abort level, 6.4 degC of margin, tracking error 4.6 degC rms |
+
+A toaster oven with the door closed has a cool-down time constant of 200-600 s,
+so 800 s covers the class with room to spare; before this was fixed the budget
+only closed below ~112 s, which is why every good run ended in `FAULT_TIMEOUT`.
+Sensor lag is the harder limit and no gain choice removes it: the SAC305 profile
+asks for 245 degC within 240 s of ramp, and a first-order lag of 300 s cannot
+report that rise inside the window whatever the controller does. Keep the
+thermocouple bead bare and in the air - a sheathed probe strapped to a lump of
+metal is how you leave the supported range without noticing.
+
+**Outside it the firmware degrades by stopping, not by improvising.** What the
+operator sees, all measured at the same `KLOSS=0.00125` corner:
+
+| Condition | What happens | On screen |
+| --- | --- | --- |
+| Sensor lag 10-20 s | the run still completes, but the SAC305 peak climbs from 253.6 to 258.5 degC: the margin to its own abort level falls from 6.4 degC to 1.5 degC | nothing unusual - this is the band to distrust, and the reason the limit is written down instead of being left to chance |
+| Sensor lag 25 s and up | the SAC305 peak reaches the profile's abort level during the ramp (`Sn63Pb37` follows at 30 s, the 120 degC bake at 45 s) | `FAULT_OVERTEMP`, SSR cut, latched until `reflow clear` |
+| Sensor lag around 300 s | a heating stage never reaches target inside nominal + grace | `FAULT_TIMEOUT`, SSR cut, latched until `reflow clear` |
+| Cool-down time constant above ~800 s | the cooling stage exceeds `REFLOW_COOL_GRACE_MS` | `FAULT_TIMEOUT` with the element already off; read it as "the sensor is stuck above the target, or something is still delivering heat" |
+
+Both failure modes end with the element off and a fault that has to be cleared by
+hand. What the firmware deliberately does *not* do is widen `grace_ms` until the
+alarm stops: a heating stage that overruns means the element is on and a board is
+cooking to an unknown temperature, so that timeout is load-bearing. Only the
+cooling stage - heater off by construction - gets the large budget.
+
 ## Safety
 
 The firmware fails safe in these cases, always by cutting the SSR and latching
@@ -434,7 +478,10 @@ a fault that needs an explicit clear:
 - temperature above `CONFIG_REFLOW_ABS_MAX_TEMP_C` (270 degC default) or above
   the running profile's own abort level (`FAULT_OVERTEMP`);
 - a stage that overruns its nominal time by more than the grace period, i.e. the
-  oven cannot follow the profile (`FAULT_TIMEOUT`);
+  oven cannot follow the profile (`FAULT_TIMEOUT`). A **cooling** stage is
+  budgeted separately and generously (`REFLOW_COOL_GRACE_MS`, 30 min) because
+  the element is already off there and a slow passive cool-down is a property of
+  the oven, not a fault - see "What oven this controls" above;
 - the control loop stopping: the heater output disarms itself if no duty request
   arrives within `CONFIG_REFLOW_HEATER_STALE_MS`.
 
@@ -469,7 +516,7 @@ Toolchain used so far: Zephyr 4.4.99, Zephyr SDK 1.0.1, west 1.5.0.
 
 | Level | What |
 | --- | --- |
-| Logic verified by tests | PID and profile state machine: 12 ztest cases plus the closed-loop host simulation above |
+| Logic verified by tests | PID and profile state machine: 16 ztest cases (4 PID, 12 profile) plus the closed-loop host simulation above |
 | Builds and flashes | `rpi_pico2/rp2350a/m33`, minimal target (core + shell over USB CDC ACM) |
 | Runs on hardware | thermocouple read path: live readings, open-circuit detection, latched fault. Bench validation of the heater output still pending |
 | Verified without hardware | the page, by `node tools/test_page.js`: transport selection, rendering, and picking JSON out of shell noise |
