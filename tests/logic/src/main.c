@@ -147,12 +147,12 @@ ZTEST(reflow_profile, test_ramp_setpoint_is_interpolated)
 	zassert_equal(run.setpoint_mc, 20000, "ramp must start at the entry temp");
 
 	/* Half the ramp: setpoint halfway between 20 and 100 degC. */
-	(void)reflow_run_tick(&run, &test_prof, 5000, 20000);
+	(void)reflow_run_tick(&run, &test_prof, 5000, 20000, 20000);
 	zassert_within(run.setpoint_mc, 60000, 500,
 		       "expected ~60000 mC, got %d", run.setpoint_mc);
 
 	/* Setpoint never overshoots the stage target. */
-	(void)reflow_run_tick(&run, &test_prof, 4000, 20000);
+	(void)reflow_run_tick(&run, &test_prof, 4000, 20000, 20000);
 	zassert_true(run.setpoint_mc <= 100000, "setpoint %d above target",
 		     run.setpoint_mc);
 }
@@ -164,11 +164,11 @@ ZTEST(reflow_profile, test_stage_advances_only_when_hot_enough)
 	reflow_run_start(&run, &test_prof, 20000);
 
 	/* Time is up but the oven is cold: stay in stage 0. */
-	(void)reflow_run_tick(&run, &test_prof, 10000, 20000);
+	(void)reflow_run_tick(&run, &test_prof, 10000, 20000, 20000);
 	zassert_equal(run.stage, 0, "advanced with the oven still cold");
 
 	/* Target reached: move on, and the new stage starts from here. */
-	(void)reflow_run_tick(&run, &test_prof, 100, 99000);
+	(void)reflow_run_tick(&run, &test_prof, 100, 99000, 99000);
 	zassert_equal(run.stage, 1, "should have entered the soak");
 	zassert_equal(run.stage_ms, 0, "stage timer must restart");
 	zassert_equal(run.stage_start_mc, 99000, "entry temperature not recorded");
@@ -183,10 +183,10 @@ ZTEST(reflow_profile, test_grace_period_expiry_is_a_fault)
 
 	/* Oven never heats: nominal 10 s + 5 s grace, then fault. */
 	for (int i = 0; i < 200 && res == REFLOW_RUN_ACTIVE; i++) {
-		res = reflow_run_tick(&run, &test_prof, 250, 21000);
+		res = reflow_run_tick(&run, &test_prof, 250, 21000, 21000);
 	}
 	zassert_equal(res, REFLOW_RUN_ERR_TIMEOUT, "expected a timeout fault");
-	zassert_equal(reflow_run_tick(&run, &test_prof, 250, 21000),
+	zassert_equal(reflow_run_tick(&run, &test_prof, 250, 21000, 21000),
 		      REFLOW_RUN_ERR_TIMEOUT, "fault must latch");
 }
 
@@ -195,7 +195,7 @@ ZTEST(reflow_profile, test_overtemp_aborts)
 	struct reflow_run run;
 
 	reflow_run_start(&run, &test_prof, 20000);
-	zassert_equal(reflow_run_tick(&run, &test_prof, 100, 151000),
+	zassert_equal(reflow_run_tick(&run, &test_prof, 100, 151000, 151000),
 		      REFLOW_RUN_ERR_OVERTEMP, "abort level not enforced");
 }
 
@@ -227,7 +227,7 @@ ZTEST(reflow_profile, test_full_run_completes)
 		} else {
 			temp -= 1500;
 		}
-		res = reflow_run_tick(&run, &test_prof, 250, temp);
+		res = reflow_run_tick(&run, &test_prof, 250, temp, temp);
 	}
 
 	zassert_equal(res, REFLOW_RUN_DONE, "run did not finish (res=%d, stage=%u)",
@@ -279,7 +279,7 @@ ZTEST(reflow_profile, test_resfriamento_passivo_realista_nao_e_falta)
 			temp -= (int32_t)(((int64_t)(temp - AMBIENT_MC) * dt_ms) /
 					  OVEN_TAU_MS);
 		}
-		res = reflow_run_tick(&run, p, dt_ms, temp);
+		res = reflow_run_tick(&run, p, dt_ms, temp, temp);
 		elapsed_ms += dt_ms;
 	}
 
@@ -321,7 +321,7 @@ ZTEST(reflow_profile, test_estagio_de_aquecimento_continua_com_a_graca_curta)
 
 	/* Forno morto: nunca sai do ambiente. */
 	while (res == REFLOW_RUN_ACTIVE && elapsed_ms <= REFLOW_COOL_GRACE_MS) {
-		res = reflow_run_tick(&run, p, dt_ms, AMBIENT_MC);
+		res = reflow_run_tick(&run, p, dt_ms, AMBIENT_MC, AMBIENT_MC);
 		elapsed_ms += dt_ms;
 	}
 
@@ -331,6 +331,58 @@ ZTEST(reflow_profile, test_estagio_de_aquecimento_continua_com_a_graca_curta)
 		      "falta saiu em %u ms, depois do nominal %u + graca %u: o "
 		      "orcamento do resfriamento vazou para o aquecimento",
 		      elapsed_ms, st->nominal_ms, p->grace_ms);
+}
+
+/*
+ * RFO-B34, cenario C da issue: um degrau real e persistente acima do abort do
+ * perfil e abaixo do corte absoluto de 270 degC.
+ *
+ * O valor filtrado vem do reflow_spike_filter() DE VERDADE, nao de um numero
+ * escolhido a mao: um teste que encenasse a supressao passaria mesmo que o
+ * filtro nao suprimisse nada, e nao teria exercitado o defeito. Antes deste
+ * patch nenhuma das duas barreiras via a subida - a do perfil porque le o valor
+ * suprimido, a absoluta porque 265 degC ainda esta abaixo dela.
+ */
+ZTEST(reflow_profile, test_abort_do_perfil_enxerga_a_amostra_crua)
+{
+	const int32_t raw_mc = 151000;   /* acima do abort de 150 degC do test_prof */
+	struct reflow_spike spike;
+	struct reflow_run run;
+	int32_t filtered;
+	enum reflow_spike_result sres;
+
+	reflow_spike_reset(&spike);
+	(void)reflow_spike_filter(&spike, 25000, &filtered);
+	zassert_equal(filtered, 25000, "primeira amostra deveria passar intacta");
+
+	reflow_run_start(&run, &test_prof, filtered);
+
+	/* O degrau e maior que REFLOW_SPIKE_MAX_STEP_MC, entao o filtro segura. */
+	sres = reflow_spike_filter(&spike, raw_mc, &filtered);
+	zassert_equal(sres, REFLOW_SPIKE_REJECT,
+		      "o filtro nao suprimiu: este teste deixou de exercitar o defeito");
+	zassert_true(filtered < test_prof.abort_mc,
+		     "a leitura filtrada (%d) ja passou do abort: idem", filtered);
+
+	zassert_equal(reflow_run_tick(&run, &test_prof, 250, filtered, raw_mc),
+		      REFLOW_RUN_ERR_OVERTEMP,
+		      "forno a %d mC com o filtro segurando em %d mC e a corrida seguiu",
+		      raw_mc, filtered);
+}
+
+/*
+ * A barreira antiga nao pode ter enfraquecido: leitura filtrada acima do abort
+ * continua abortando, mesmo com a bruta abaixo. E o caso de uma leitura travada
+ * alto - nao e motivo para voltar a energizar.
+ */
+ZTEST(reflow_profile, test_abort_pela_leitura_filtrada_continua_valendo)
+{
+	struct reflow_run run;
+
+	reflow_run_start(&run, &test_prof, 20000);
+	zassert_equal(reflow_run_tick(&run, &test_prof, 250, 151000, 25000),
+		      REFLOW_RUN_ERR_OVERTEMP,
+		      "abort pela leitura filtrada deixou de valer");
 }
 
 ZTEST(reflow_profile, test_nominal_duration)

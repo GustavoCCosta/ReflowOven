@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
 #include "profile.h"
+#include "tempguard.h"
 
 static const struct reflow_profile builtin[] = {
 	{
@@ -177,7 +178,7 @@ static bool stage_complete(const struct reflow_stage *st,
 
 enum reflow_run_result reflow_run_tick(struct reflow_run *run,
 				       const struct reflow_profile *prof,
-				       uint32_t dt_ms, int32_t temp_mc)
+				       uint32_t dt_ms, int32_t temp_mc, int32_t raw_mc)
 {
 	const struct reflow_stage *st;
 
@@ -190,7 +191,14 @@ enum reflow_run_result reflow_run_tick(struct reflow_run *run,
 		return run->result;
 	}
 
-	if (temp_mc >= prof->abort_mc) {
+	/*
+	 * Judged against both readings, like the absolute cut-out in
+	 * controller.c and through the same predicate, so the two barriers
+	 * cannot drift apart (RFO-B34). Only the filtered value feeds the stage
+	 * machine below - a suppressed sample must not advance a stage - but it
+	 * must not hide an abort either.
+	 */
+	if (reflow_overtemp_tripped(temp_mc, raw_mc, prof->abort_mc)) {
 		run->result = REFLOW_RUN_ERR_OVERTEMP;
 		return run->result;
 	}

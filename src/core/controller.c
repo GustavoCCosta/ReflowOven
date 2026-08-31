@@ -194,7 +194,7 @@ static void run_step(uint32_t dt_ms, bool new_sample, uint32_t sample_dt_ms)
 	enum reflow_run_result res;
 	float duty;
 
-	res = reflow_run_tick(&ctx.run, ctx.prof, dt_ms, ctx.temp_mc);
+	res = reflow_run_tick(&ctx.run, ctx.prof, dt_ms, ctx.temp_mc, ctx.temp_raw_mc);
 	ctx.setpoint_mc = ctx.run.setpoint_mc;
 
 	switch (res) {
