@@ -6,12 +6,15 @@
  * Run with:  west twister -T tests -p native_sim
  */
 
+#include <string.h>
+
 #include <zephyr/ztest.h>
 
 #include "pid.h"
 #include "profile.h"
 #include "net/cmdparse.h"
 #include "net/httpgate.h"
+#include "net/profiles_json.h"
 #include "tempguard.h"
 
 /* ------------------------------------------------------------------ PID */
@@ -910,3 +913,225 @@ ZTEST(reflow_tempguard, test_backstop_boundaries)
 }
 
 ZTEST_SUITE(reflow_tempguard, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------------- profiles_json */
+
+/*
+ * RFO-B09. httpd.c built the /api/profiles body by accumulating the return of
+ * snprintk(), which is the length that WOULD have been written. One long name
+ * past the buffer and the next call got (size_t)(sizeof(body) - n) with
+ * n > sizeof(body) - an unsigned subtraction landing near SIZE_MAX - into a
+ * destination already out of bounds, and the same n went to send_all() as the
+ * length. Overflow on the stack, on a path reachable from the network.
+ *
+ * The formatter is a pure function now, so the case that used to be
+ * unreachable-with-three-short-names is one array away from being tested.
+ */
+
+/* A canary either side of the buffer: any write outside is visible. */
+struct guarded {
+	char before[16];
+	char body[512];
+	char after[16];
+};
+
+static void guarded_init(struct guarded *g)
+{
+	memset(g, 0xAA, sizeof(*g));
+}
+
+static void guarded_check(const struct guarded *g, size_t cap)
+{
+	for (size_t i = 0; i < sizeof(g->before); i++) {
+		zassert_equal((unsigned char)g->before[i], 0xAAU,
+			      "wrote %zu bytes before the buffer", sizeof(g->before) - i);
+	}
+	for (size_t i = 0; i < sizeof(g->after); i++) {
+		zassert_equal((unsigned char)g->after[i], 0xAAU,
+			      "wrote past the end of the buffer (+%zu)", i);
+	}
+	/* Anything past cap inside body must also be untouched. */
+	for (size_t i = cap; i < sizeof(g->body); i++) {
+		zassert_equal((unsigned char)g->body[i], 0xAAU,
+			      "wrote past cap, at body[%zu]", i);
+	}
+}
+
+/* Profile table the test owns, so no dependency on the built-in one. */
+static struct reflow_profile fake_profiles[8];
+static uint8_t fake_count;
+
+static const struct reflow_profile *fake_lookup(uint8_t idx)
+{
+	return idx < fake_count ? &fake_profiles[idx] : NULL;
+}
+
+static void set_profiles(uint8_t n, const char *const *names)
+{
+	zassert_true(n <= ARRAY_SIZE(fake_profiles), "test wants too many profiles");
+	for (uint8_t i = 0; i < n; i++) {
+		fake_profiles[i].name = names[i];
+	}
+	fake_count = n;
+}
+
+ZTEST(reflow_profiles_json, test_short_list_is_exact)
+{
+	static const char *const names[] = { "SAC305", "Sn63Pb37", "bake" };
+	struct guarded g;
+	size_t n;
+
+	guarded_init(&g);
+	set_profiles(3, names);
+
+	n = reflow_profiles_json(g.body, sizeof(g.body), fake_lookup, 3);
+
+	zassert_equal(n, strlen(g.body), "returned length does not match the string");
+	zassert_str_equal(g.body, "{\"profiles\":[\"SAC305\",\"Sn63Pb37\",\"bake\"]}",
+			  "body was %s", g.body);
+	guarded_check(&g, sizeof(g.body));
+}
+
+ZTEST(reflow_profiles_json, test_empty_list_is_valid_json)
+{
+	struct guarded g;
+	size_t n;
+
+	guarded_init(&g);
+	fake_count = 0;
+
+	n = reflow_profiles_json(g.body, sizeof(g.body), fake_lookup, 0);
+
+	zassert_str_equal(g.body, "{\"profiles\":[]}", "body was %s", g.body);
+	zassert_equal(n, strlen(g.body), NULL);
+	guarded_check(&g, sizeof(g.body));
+}
+
+/*
+ * The assertion that goes red without the patch. Eight names of 40 characters
+ * blow well past the 256 bytes httpd.c hands in, which is exactly the condition
+ * that made the old code compute sizeof(body) - n near SIZE_MAX.
+ */
+ZTEST(reflow_profiles_json, test_overflow_never_leaves_the_buffer)
+{
+	static const char *const names[] = {
+		"0123456789012345678901234567890123456789",
+		"1123456789012345678901234567890123456789",
+		"2123456789012345678901234567890123456789",
+		"3123456789012345678901234567890123456789",
+		"4123456789012345678901234567890123456789",
+		"5123456789012345678901234567890123456789",
+		"6123456789012345678901234567890123456789",
+		"7123456789012345678901234567890123456789",
+	};
+	const size_t cap = 256;
+	struct guarded g;
+	size_t n;
+
+	guarded_init(&g);
+	set_profiles(8, names);
+
+	n = reflow_profiles_json(g.body, cap, fake_lookup, 8);
+
+	zassert_true(n < cap, "returned %zu for a %zu byte buffer", n, cap);
+	zassert_equal(g.body[n], '\0', "the body is not terminated at the length returned");
+	zassert_equal(n, strlen(g.body), "returned length counts bytes that were not written");
+	guarded_check(&g, cap);
+}
+
+ZTEST(reflow_profiles_json, test_truncation_is_explicit_and_still_json)
+{
+	static const char *const names[] = {
+		"0123456789012345678901234567890123456789",
+		"1123456789012345678901234567890123456789",
+		"2123456789012345678901234567890123456789",
+		"3123456789012345678901234567890123456789",
+		"4123456789012345678901234567890123456789",
+		"5123456789012345678901234567890123456789",
+		"6123456789012345678901234567890123456789",
+		"7123456789012345678901234567890123456789",
+	};
+	struct guarded g;
+	size_t n;
+
+	guarded_init(&g);
+	set_profiles(8, names);
+
+	n = reflow_profiles_json(g.body, 256, fake_lookup, 8);
+
+	/* Valid JSON, closed, and honest about being short. */
+	zassert_equal(g.body[0], '{', "body does not open an object");
+	zassert_equal(g.body[n - 1], '}', "body does not close: %s", g.body);
+	zassert_not_null(strstr(g.body, "\"truncated\":true"),
+			 "a short list must say so: %s", g.body);
+	/* Never half a name: the last entry before the tail is closed. */
+	zassert_not_null(strstr(g.body, "\"]"), "an entry was cut mid-string: %s", g.body);
+}
+
+ZTEST(reflow_profiles_json, test_quote_and_backslash_are_escaped)
+{
+	static const char *const names[] = { "he said \"hi\"", "back\\slash" };
+	struct guarded g;
+	size_t n;
+
+	guarded_init(&g);
+	set_profiles(2, names);
+
+	n = reflow_profiles_json(g.body, sizeof(g.body), fake_lookup, 2);
+
+	zassert_str_equal(g.body,
+			  "{\"profiles\":[\"he said \\\"hi\\\"\",\"back\\\\slash\"]}",
+			  "unescaped name reaches the wire: %s", g.body);
+	zassert_equal(n, strlen(g.body), NULL);
+	guarded_check(&g, sizeof(g.body));
+}
+
+ZTEST(reflow_profiles_json, test_buffer_too_small_writes_nothing)
+{
+	static const char *const names[] = { "SAC305" };
+	struct guarded g;
+	size_t n;
+
+	guarded_init(&g);
+	set_profiles(1, names);
+
+	n = reflow_profiles_json(g.body, REFLOW_PROFILES_JSON_MIN - 1U, fake_lookup, 1);
+
+	zassert_equal(n, 0, "claimed to write %zu bytes into a buffer that cannot hold a body", n);
+	zassert_equal(g.body[0], '\0', "left the buffer non-empty while returning 0");
+	guarded_check(&g, REFLOW_PROFILES_JSON_MIN - 1U);
+}
+
+/*
+ * Every cap from too-small to comfortable, with names that overflow most of
+ * them. One of these sizes is the boundary where the tail stops fitting, and a
+ * clamp that is off by one shows up here rather than in a browser.
+ */
+ZTEST(reflow_profiles_json, test_every_buffer_size_is_safe)
+{
+	static const char *const names[] = {
+		"0123456789012345678901234567890123456789",
+		"1123456789012345678901234567890123456789",
+		"2123456789012345678901234567890123456789",
+	};
+
+	set_profiles(3, names);
+
+	for (size_t cap = 1; cap <= 200; cap++) {
+		struct guarded g;
+		size_t n;
+
+		guarded_init(&g);
+		n = reflow_profiles_json(g.body, cap, fake_lookup, 3);
+
+		zassert_true(n < cap, "cap %zu: returned %zu", cap, n);
+		zassert_equal(n, strlen(g.body), "cap %zu: length disagrees with the string", cap);
+		if (n > 0) {
+			zassert_equal(g.body[0], '{', "cap %zu: not an object", cap);
+			zassert_equal(g.body[n - 1], '}', "cap %zu: not closed", cap);
+		}
+		guarded_check(&g, cap);
+	}
+}
+
+ZTEST_SUITE(reflow_profiles_json, NULL, NULL, NULL, NULL, NULL);

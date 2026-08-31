@@ -29,6 +29,7 @@
 #include "httpgate.h"
 #include "index_html.h"
 #include "net.h"
+#include "profiles_json.h"
 
 LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
 
@@ -107,15 +108,22 @@ static int send_response(int fd, const char *status, const char *ctype,
 static int send_profiles(int fd)
 {
 	char body[256];
-	int n = snprintk(body, sizeof(body), "{\"profiles\":[");
+	size_t n = reflow_profiles_json(body, sizeof(body), reflow_profile_get,
+					reflow_profile_count());
 
-	for (uint8_t i = 0; i < reflow_profile_count(); i++) {
-		n += snprintk(body + n, (size_t)(sizeof(body) - n), "%s\"%s\"",
-			      i ? "," : "", reflow_profile_get(i)->name);
+	/*
+	 * Zero means not even the empty form fit, which with a 256 byte buffer
+	 * cannot happen today - it would take shrinking this array below
+	 * REFLOW_PROFILES_JSON_MIN. Handled anyway, because the alternative is
+	 * sending a Content-Length of 0 with a 200 and letting the page parse an
+	 * empty body as JSON.
+	 */
+	if (n == 0U) {
+		LOG_ERR("profile list does not fit in %zu bytes", sizeof(body));
+		return send_response(fd, "500 Internal Server Error", "text/plain", "", 0);
 	}
-	n += snprintk(body + n, (size_t)(sizeof(body) - n), "]}");
 
-	return send_response(fd, "200 OK", "application/json", body, (size_t)n);
+	return send_response(fd, "200 OK", "application/json", body, n);
 }
 
 static int handle_cmd(int fd, const char *query)
