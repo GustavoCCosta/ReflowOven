@@ -14,5 +14,6 @@ target_sources(app PRIVATE
   ${CORE}/tempguard.c
   ${SRC}/net/cmdparse.c
   ${SRC}/net/httpgate.c
+  ${SRC}/net/profiles_json.c
 )
 target_include_directories(app PRIVATE ${CORE} ${SRC})
