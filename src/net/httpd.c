@@ -30,6 +30,7 @@
 #include "index_html.h"
 #include "net.h"
 #include "profiles_json.h"
+#include "sendbudget.h"
 
 LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
 
@@ -37,6 +38,15 @@ LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
 #define MAX_CLIENTS CONFIG_REFLOW_NET_MAX_CLIENTS
 #define PUSH_MS     CONFIG_REFLOW_NET_PUSH_PERIOD_MS
 #define REQ_BUF_SZ  512
+#define SEND_BUDGET_MS CONFIG_REFLOW_NET_SEND_BUDGET_MS
+
+/*
+ * How long one zsock_send() may block before it hands control back so the
+ * budget can be re-checked. This is the granularity of the deadline, not the
+ * deadline: a client gets SEND_BUDGET_MS of no progress in total, checked
+ * every slice. Small enough that the stall is short, large enough not to spin.
+ */
+#define SEND_SLICE_MS 100
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
 static struct k_mutex snap_lock;
@@ -66,17 +76,48 @@ static int build_state_json(char *buf, size_t len)
 	return reflow_telemetry_json(&t, buf, len);
 }
 
+/*
+ * Send it all, or give up on this client - but never park the server thread
+ * on one socket (RFO-B07).
+ *
+ * The accepted socket carries SO_SNDTIMEO, so zsock_send() returns EAGAIN
+ * after a slice instead of blocking for ever. Whether that means "slow" or
+ * "gone" is not a socket question, and it is not answered here: the budget in
+ * sendbudget.c decides, from the time since the last byte actually moved.
+ */
 static int send_all(int fd, const char *data, size_t len)
 {
+	struct reflow_send_budget budget;
+
+	reflow_send_budget_start(&budget, k_uptime_get(), SEND_BUDGET_MS);
+
 	while (len > 0) {
 		ssize_t sent = zsock_send(fd, data, len, 0);
 
-		if (sent <= 0) {
-			return -1;
+		if (sent > 0) {
+			data += sent;
+			len -= (size_t)sent;
+			reflow_send_budget_progress(&budget, k_uptime_get());
+			continue;
 		}
-		data += sent;
-		len -= (size_t)sent;
+
+		/*
+		 * EAGAIN here is the slice expiring with the peer not reading.
+		 * Anything else is a dead socket and there is nothing to wait for.
+		 */
+		if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (!reflow_send_budget_expired(&budget, k_uptime_get())) {
+				continue;
+			}
+			LOG_WRN("client stopped reading, dropping it after %d ms",
+				SEND_BUDGET_MS);
+		}
+
+		reflow_send_budget_done(&budget);
+		return -1;
 	}
+
+	reflow_send_budget_done(&budget);
 	return 0;
 }
 
@@ -370,6 +411,23 @@ static void httpd_thread(void *a, void *b, void *c)
 					LOG_WRN("client limit reached");
 					zsock_close(fd);
 				} else {
+					/*
+					 * Without this the send below can block for
+					 * ever on one peer and take the whole server
+					 * with it (RFO-B07). A failure here is not
+					 * fatal but it does restore the old hazard, so
+					 * it is logged rather than ignored.
+					 */
+					struct zsock_timeval tv = {
+						.tv_sec = SEND_SLICE_MS / 1000,
+						.tv_usec = (SEND_SLICE_MS % 1000) * 1000,
+					};
+
+					if (zsock_setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+							     &tv, sizeof(tv)) < 0) {
+						LOG_WRN("SO_SNDTIMEO: %d; a stalled client "
+							"can block the server", errno);
+					}
 					slot->fd = fd;
 					slot->sse = false;
 				}

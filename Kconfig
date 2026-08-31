@@ -254,6 +254,19 @@ config REFLOW_NET_PUSH_PERIOD_MS
 	default 1000
 	range 200 10000
 
+config REFLOW_NET_SEND_BUDGET_MS
+	int "Drop a client that accepts no data for (ms)"
+	default 500
+	range 100 10000
+	help
+	  The server has one thread. A client that asks for a page and then
+	  stops reading would park that thread inside send() for ever, which
+	  stops the event stream for every other client and kills the remote
+	  Stop button (RFO-B07). This bounds it: after this long with no byte
+	  accepted, the connection is closed. It measures silence, not
+	  connection age, so a slow but progressing download is never dropped
+	  and an idle event stream is never touched.
+
 config REFLOW_NET_STACK_SIZE
 	int "HTTP server thread stack size"
 	default 4096

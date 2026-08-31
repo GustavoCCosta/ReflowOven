@@ -33,7 +33,8 @@ target_sources_ifdef(CONFIG_REFLOW_SHELL      app PRIVATE src/shell_cmds.c)
 # Web UI: the server plus exactly one link implementation.
 target_sources_ifdef(CONFIG_REFLOW_NET           app PRIVATE src/net/httpd.c src/net/cmdparse.c
                                                             src/net/httpgate.c src/net/l4.c
-                                                            src/net/profiles_json.c)
+                                                            src/net/profiles_json.c
+                                                            src/net/sendbudget.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI     app PRIVATE src/net/wifi.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_USB_ECM  app PRIVATE src/net/usb_net.c)
 
