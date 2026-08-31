@@ -1409,4 +1409,100 @@ ZTEST(reflow_sendbudget, test_a_clock_that_goes_backwards_keeps_the_client)
 		      "time going backwards was read as the budget being spent");
 }
 
+
+/*
+ * RFO-B08. Um cliente que abre a conexao e nao envia nada nunca fica legivel,
+ * entao o serve() nunca roda e o client_close() nunca acontece. Quatro deles
+ * ("nc <ip> 80" quatro vezes) tomam os quatro slots, e todo accept() seguinte e
+ * fechado na chegada: a UI web, e com ela o Parar remoto, some ate o reset da
+ * placa — possivelmente com o forno em ciclo.
+ *
+ * Este prazo e o irmao do de envio e nao o mesmo: aquele mede o cliente
+ * enquanto o servidor FALA com ele; este mede um que nunca disse nada. Os dois
+ * dividem a aritmetica e nao a instancia.
+ */
+
+#define IDLE_MS 5000
+
+ZTEST(reflow_sendbudget, test_conexao_muda_perde_o_slot)
+{
+	struct reflow_idle_budget b;
+
+	reflow_idle_budget_start(&b, 1000, IDLE_MS);
+
+	zassert_false(reflow_idle_budget_expired(&b, 1000), "expirou na hora do accept");
+	zassert_false(reflow_idle_budget_expired(&b, 1000 + IDLE_MS),
+		      "expirou no limite: o ultimo instante permitido tem de sobreviver");
+	zassert_true(reflow_idle_budget_expired(&b, 1000 + IDLE_MS + 1),
+		     "conexao calada manteve o slot depois do prazo");
+}
+
+/*
+ * O item que troca um defeito de disponibilidade por outro se for feito errado:
+ * um SSE estabelecido fica ocioso por definicao e nao pode ser fechado por este
+ * caminho, nunca.
+ */
+ZTEST(reflow_sendbudget, test_um_sse_estabelecido_nunca_e_fechado_pelo_prazo)
+{
+	struct reflow_idle_budget b;
+
+	reflow_idle_budget_start(&b, 1000, IDLE_MS);
+	reflow_idle_budget_disarm(&b);   /* virou event stream */
+
+	zassert_false(reflow_idle_budget_expired(&b, 1000 + 86400000LL),
+		      "um event stream foi derrubado por ociosidade depois de um dia");
+}
+
+/* Requisicao que chegou dentro do prazo: desarmado, e nunca mais fechado. */
+ZTEST(reflow_sendbudget, test_requisicao_atendida_desarma_o_prazo)
+{
+	struct reflow_idle_budget b;
+
+	reflow_idle_budget_start(&b, 0, IDLE_MS);
+	zassert_false(reflow_idle_budget_expired(&b, IDLE_MS - 1), "expirou cedo demais");
+
+	reflow_idle_budget_disarm(&b);
+	zassert_false(reflow_idle_budget_expired(&b, IDLE_MS * 100),
+		      "conexao ja atendida ainda pode ser fechada pelo prazo de accept");
+}
+
+ZTEST(reflow_sendbudget, test_prazo_de_ociosidade_desligado_nunca_expira)
+{
+	struct reflow_idle_budget b;
+
+	reflow_idle_budget_start(&b, 0, 0);
+	zassert_false(reflow_idle_budget_expired(&b, 86400000LL),
+		      "orcamento 0 tem de significar sem prazo, nao prazo instantaneo");
+}
+
+/* Mesma regra do prazo de envio, e de proposito: relogio para tras mantem. */
+ZTEST(reflow_sendbudget, test_prazo_de_ociosidade_com_relogio_para_tras)
+{
+	struct reflow_idle_budget b;
+
+	reflow_idle_budget_start(&b, 100000, IDLE_MS);
+	zassert_false(reflow_idle_budget_expired(&b, 0),
+		      "tempo andando para tras foi lido como prazo gasto");
+}
+
+/*
+ * Os dois prazos tem de concordar sobre o que "tempo demais" significa. Sao
+ * tipos diferentes com nomes honestos, mas uma aritmetica so; se alguem um dia
+ * duplicar a conta, este teste e que percebe.
+ */
+ZTEST(reflow_sendbudget, test_os_dois_prazos_concordam_no_limite)
+{
+	struct reflow_send_budget snd;
+	struct reflow_idle_budget idle;
+
+	reflow_send_budget_start(&snd, 0, 1000);
+	reflow_idle_budget_start(&idle, 0, 1000);
+
+	for (int64_t t = 0; t <= 1002; t++) {
+		zassert_equal(reflow_send_budget_expired(&snd, t),
+			      reflow_idle_budget_expired(&idle, t),
+			      "os dois prazos discordam em t=%lld ms", (long long)t);
+	}
+}
+
 ZTEST_SUITE(reflow_sendbudget, NULL, NULL, NULL, NULL, NULL);

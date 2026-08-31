@@ -267,6 +267,20 @@ config REFLOW_NET_SEND_BUDGET_MS
 	  connection age, so a slow but progressing download is never dropped
 	  and an idle event stream is never touched.
 
+config REFLOW_NET_IDLE_BUDGET_MS
+	int "Reclaim a connection that sends no request within (ms)"
+	default 5000
+	range 1000 60000
+	help
+	  A connection that is accepted and then says nothing never becomes
+	  readable, so the server never serves it and never closes it. Four of
+	  them take every slot and the web UI - with the remote Stop button -
+	  is unreachable until the board is reset (RFO-B08). After this long
+	  without a request arriving, the slot is reclaimed.
+
+	  It applies only to a request that has not arrived yet: an established
+	  event stream is idle by definition and is never closed by it.
+
 config REFLOW_NET_STACK_SIZE
 	int "HTTP server thread stack size"
 	default 4096
