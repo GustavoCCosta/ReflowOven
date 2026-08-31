@@ -454,8 +454,10 @@ thermocouple bead bare and in the air - a sheathed probe strapped to a lump of
 metal is how you leave the supported range without noticing.
 
 **Outside it the firmware degrades by stopping, not by improvising.** Every row
-below names the point it was measured at: these thresholds move with the other
-parameter, and none of them reproduces at the `host_sim` defaults.
+below names the point it was measured at, and these thresholds move with the other
+parameter. Three of the four need that other parameter away from its `host_sim`
+default as well; the 300 s row is the exception, reproducing at the default cooling
+rate - it is the reproduction that promoted RFO-B04.
 
 | Condition | What happens | On screen |
 | --- | --- | --- |
