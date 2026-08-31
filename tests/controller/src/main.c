@@ -33,9 +33,10 @@
 
 typedef bool (*pred_fn)(const struct reflow_telemetry *t, int arg);
 
-static bool wait_for(pred_fn pred, int arg, struct reflow_telemetry *last)
+static bool wait_for_ms(pred_fn pred, int arg, struct reflow_telemetry *last,
+			int64_t budget_ms)
 {
-	int64_t deadline = k_uptime_get() + SETTLE_MS;
+	int64_t deadline = k_uptime_get() + budget_ms;
 
 	while (true) {
 		zassert_ok(zbus_chan_read(&reflow_telemetry_chan, last, K_MSEC(200)),
@@ -48,6 +49,11 @@ static bool wait_for(pred_fn pred, int arg, struct reflow_telemetry *last)
 		}
 		k_msleep(10);
 	}
+}
+
+static bool wait_for(pred_fn pred, int arg, struct reflow_telemetry *last)
+{
+	return wait_for_ms(pred, arg, last, SETTLE_MS);
 }
 
 static bool is_state(const struct reflow_telemetry *t, int arg)
@@ -262,6 +268,90 @@ ZTEST(reflow_controller, test_a_cleared_fault_allows_a_new_run)
 	post(REFLOW_CMD_START, 0);
 	zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t),
 		     "the oven refused to run after a cleared fault (state %s, fault %s)",
+		     reflow_state_str(t.state), reflow_fault_str(t.fault));
+}
+
+/*
+ * RFO-T10: a stage overrun has to become a latched FAULT_TIMEOUT with the
+ * element cut, not just a return code.
+ *
+ * tests/logic already pins the profile machine's half of this
+ * (test_grace_period_expiry_is_a_fault: reflow_run_tick() returns
+ * REFLOW_RUN_ERR_TIMEOUT and keeps returning it). What had no coverage is
+ * controller.c translating that into REFLOW_FAULT_TIMEOUT, dropping the duty and
+ * refusing to run again until an explicit clear -- one of the four latches the
+ * README promises.
+ *
+ * The sensor stays healthy and cold at the fake's 25 degC idle for the whole
+ * run, so the "preheat" stage of profile 0 never reaches its 150 degC target and
+ * overruns nominal_ms (90 s) plus grace_ms (60 s).
+ *
+ * That is 150 s of the oven's own clock, and it cannot be shortened from the test
+ * side: run->stage_ms accumulates elapsed time, so no sample-period setting makes
+ * it cheaper, and every other built-in profile's first heating stage is longer.
+ * It costs far less than 150 s of real time, though: the simulated platforms
+ * fast-forward their clock while every thread is sleeping, which is nearly all of
+ * this test. Measured on qemu_x86, the whole suite is 39 s of wall clock with the
+ * build included, so the suite's existing timeout still fits.
+ */
+ZTEST(reflow_controller, test_heating_stage_overrun_latches_fault_timeout)
+{
+	const struct reflow_profile *p = reflow_profile_get(0);
+	const struct reflow_stage *st;
+	struct reflow_telemetry t;
+	int64_t started, took;
+
+	zassert_not_null(p, "profile 0 does not exist");
+	st = &p->stages[0];
+	zassert_true(st->kind != REFLOW_STAGE_COOL,
+		     "this test needs a HEATING first stage: a cooling one gets a "
+		     "much larger grace budget and would measure something else");
+
+	post(REFLOW_CMD_START, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t), "the run did not start");
+	started = k_uptime_get();
+
+	/*
+	 * Budget: nominal + grace, plus SETTLE_MS of slack for the control
+	 * period and the telemetry poll.
+	 */
+	zassert_true(wait_for_ms(is_fault, REFLOW_FAULT_TIMEOUT, &t,
+				 (int64_t)st->nominal_ms + p->grace_ms + SETTLE_MS),
+		     "a cold oven never reached FAULT_TIMEOUT: left in %s/%s",
+		     reflow_state_str(t.state), reflow_fault_str(t.fault));
+
+	took = k_uptime_get() - started;
+
+	/*
+	 * Not early, either. Without this the test would pass on a FAULT_TIMEOUT
+	 * that arrived for the wrong reason -- and a timeout raised before the
+	 * stage's own budget is spent is a firmware that gives up on an oven
+	 * that is merely slow.
+	 */
+	zassert_true(took >= (int64_t)st->nominal_ms,
+		     "FAULT_TIMEOUT came after %d ms, before the stage's nominal "
+		     "%u ms was even spent", (int)took, st->nominal_ms);
+
+	zassert_equal(t.duty_permille, 0, "duty still %u after a timeout fault",
+		      t.duty_permille);
+	zassert_false(reflow_heater_is_on(), "element still energised after a timeout fault");
+
+	/* The latch: a healthy sensor is not enough, it takes an explicit clear. */
+	post(REFLOW_CMD_START, 0);
+	k_msleep(1000);
+	zassert_ok(zbus_chan_read(&reflow_telemetry_chan, &t, K_MSEC(200)), NULL);
+	zassert_equal(t.state, REFLOW_STATE_FAULT,
+		      "START was accepted while FAULT_TIMEOUT was latched (state %s)",
+		      reflow_state_str(t.state));
+	zassert_false(reflow_heater_is_on(), "element energised by a refused START");
+
+	post(REFLOW_CMD_CLEAR_FAULT, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_IDLE, &t), "the fault would not clear");
+
+	post(REFLOW_CMD_START, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t),
+		     "the oven refused to run after the timeout fault was cleared "
+		     "(state %s, fault %s)",
 		     reflow_state_str(t.state), reflow_fault_str(t.fault));
 }
 
