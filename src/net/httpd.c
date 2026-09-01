@@ -47,6 +47,8 @@ LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
  * every slice. Small enough that the stall is short, large enough not to spin.
  */
 #define SEND_SLICE_MS 100
+
+#define IDLE_BUDGET_MS CONFIG_REFLOW_NET_IDLE_BUDGET_MS
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
 static struct k_mutex snap_lock;
@@ -202,6 +204,14 @@ static int push_event(int fd)
 struct client {
 	int fd;
 	bool sse;
+	/*
+	 * Armed at accept(), disarmed as soon as the connection is no longer a
+	 * request waiting to arrive. This is the only per-client state the
+	 * server keeps between passes through zsock_poll(), and it exists
+	 * because a client that never becomes readable never reaches serve()
+	 * and so could hold a slot for ever (RFO-B08).
+	 */
+	struct reflow_idle_budget idle;
 };
 
 static struct client clients[MAX_CLIENTS];
@@ -212,6 +222,7 @@ static void client_close(struct client *cl)
 		zsock_close(cl->fd);
 		cl->fd = -1;
 		cl->sse = false;
+		reflow_idle_budget_disarm(&cl->idle);
 	}
 }
 
@@ -430,6 +441,9 @@ static void httpd_thread(void *a, void *b, void *c)
 					}
 					slot->fd = fd;
 					slot->sse = false;
+					reflow_idle_budget_start(&slot->idle,
+								 k_uptime_get(),
+								 IDLE_BUDGET_MS);
 				}
 			}
 		}
@@ -457,6 +471,32 @@ static void httpd_thread(void *a, void *b, void *c)
 				/* Any traffic on an event stream means it ended. */
 				client_close(cl);
 			} else if (!serve(cl)) {
+				client_close(cl);
+			} else {
+				/*
+				 * serve() kept it open, which today means exactly one
+				 * thing: it is an event stream now. It is idle by
+				 * definition from here, so the accept deadline must
+				 * stop applying - closing it would trade one
+				 * availability defect for another.
+				 */
+				reflow_idle_budget_disarm(&cl->idle);
+			}
+		}
+
+		/*
+		 * Reclaim slots held by connections that never spoke. Without this,
+		 * four sockets that open and stay silent take every slot, and every
+		 * later accept() is closed on arrival: the web UI and the remote Stop
+		 * are gone until the board is reset (RFO-B08).
+		 */
+		for (int i = 0; i < MAX_CLIENTS; i++) {
+			struct client *cl = &clients[i];
+
+			if (cl->fd >= 0 &&
+			    reflow_idle_budget_expired(&cl->idle, k_uptime_get())) {
+				LOG_WRN("connection idle for %d ms without a request, "
+					"reclaiming the slot", IDLE_BUDGET_MS);
 				client_close(cl);
 			}
 		}

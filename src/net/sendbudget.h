@@ -61,4 +61,45 @@ void reflow_send_budget_done(struct reflow_send_budget *b);
  */
 bool reflow_send_budget_expired(const struct reflow_send_budget *b, int64_t now_ms);
 
+/*
+ * The other deadline this server needs, and deliberately a separate type
+ * (RFO-B08).
+ *
+ * The send budget above measures a client while the server is TALKING to it.
+ * This one measures a client that has said nothing at all: four `nc <ip> 80`
+ * take the four slots, never become readable, so serve() never runs and
+ * client_close() never happens. The web UI - and the remote Stop with it -
+ * is gone until the board is reset.
+ *
+ * Reusing struct reflow_send_budget was the cheaper option and it was refused:
+ * a type named "send" measuring silence on the receive side is a name that
+ * lies, and this codebase has already returned a patch for exactly that. What
+ * is shared instead is the arithmetic - both expired() calls sit on one
+ * internal helper, so the two deadlines cannot drift apart in behaviour while
+ * keeping names that say what they mean.
+ *
+ * Armed at accept(), disarmed the moment the connection stops being a request
+ * in flight: an established event stream is idle by definition, and closing it
+ * would trade one availability defect for another.
+ */
+struct reflow_idle_budget {
+	int64_t since_ms;
+	int64_t budget_ms;
+	bool armed;
+};
+
+/* Connection accepted. budget_ms <= 0 disables the deadline. */
+void reflow_idle_budget_start(struct reflow_idle_budget *b, int64_t now_ms,
+			      int64_t budget_ms);
+
+/*
+ * The connection is no longer a request waiting to arrive: it became an event
+ * stream, or its request was served. From here it can never be closed by this
+ * path, whatever the clock says.
+ */
+void reflow_idle_budget_disarm(struct reflow_idle_budget *b);
+
+/* True when the connection has occupied a slot without ever speaking. */
+bool reflow_idle_budget_expired(const struct reflow_idle_budget *b, int64_t now_ms);
+
 #endif /* REFLOW_SENDBUDGET_H_ */
