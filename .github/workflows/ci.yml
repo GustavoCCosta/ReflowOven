@@ -205,12 +205,12 @@ jobs:
             board: rpi_pico2/rp2350a/m33
             toolchain: arm-zephyr-eabi
             overlay: app/overlays/rpi_pico2_display_encoder.overlay
+            snippet: usb-webui
             flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_USB_ECM=y -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
           - nome: pico2-sem-rede
             board: rpi_pico2/rp2350a/m33
             toolchain: arm-zephyr-eabi
             overlay: app/overlays/rpi_pico2_display_encoder.overlay
-            snippet: usb-webui
             flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
           - nome: esp32-wifi
             board: esp32_devkitc/esp32/procpu
