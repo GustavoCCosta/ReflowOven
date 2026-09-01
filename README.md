@@ -53,6 +53,7 @@ means flipping the symbol to `n`.
 | `tests/logic/` | ztest suite for the PID and the profile machine |
 | `tests/boot/` | ztest suite for the SSR gate's state at boot, on the GPIO emulator |
 | `tests/controller/` | ztest suite for the control core, against an injectable thermocouple (`src/temp_fake.c` in place of `src/core/temp.c`) |
+| `tests/coldstart/` | ztest suite for the oven that boots with no thermocouple: same image as `tests/controller`, built with the fake's init failing once |
 | `tools/host_sim.c` | Closed-loop simulation of the same logic on the build host |
 | `tools/test_page.js` | Optional: `node tools/test_page.js` smoke tests the page's transport choice and rendering |
 
@@ -486,7 +487,13 @@ cooling stage - heater off by construction - gets the large budget.
 The firmware fails safe in these cases, always by cutting the SSR and latching
 a fault that needs an explicit clear:
 
-- thermocouple open, SPI error, reading outside -20..400 degC (`FAULT_SENSOR`);
+- thermocouple open, SPI error, reading outside -20..400 degC (`FAULT_SENSOR`).
+  An oven that powers up with no thermocouple latches this too, and recovers on
+  its own: the control thread retries the front-end every
+  `CONFIG_REFLOW_SENSOR_RETRY_MS` while it is missing, so plugging the probe in
+  and clearing the fault is enough - no reboot (RFO-B39). The retry only runs
+  while the oven is not running, so a driver is never re-initialised under a
+  live element;
 - temperature above `CONFIG_REFLOW_ABS_MAX_TEMP_C` (270 degC default) or above
   the running profile's own abort level (`FAULT_OVERTEMP`);
 - a stage that overruns its nominal time by more than the grace period, i.e. the
