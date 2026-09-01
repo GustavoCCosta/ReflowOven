@@ -32,6 +32,20 @@
 #define TEMP_MIN_MC (-20000)
 #define TEMP_MAX_MC (400000)
 
+/*
+ * How many times reflow_temp_init() fails before it starts succeeding.
+ *
+ * Set at BUILD time - see tests/coldstart/CMakeLists.txt - and deliberately
+ * not at runtime. The control thread runs its first init from K_THREAD_DEFINE
+ * before any test body, and before a `setup` hook too, so a runtime knob could
+ * never be set in time to be observed. That is exactly what made the old
+ * reflow_temp_fake_fail_init() dead code (RFO-G17). A build-time value is
+ * honest: it is fixed before anything runs, which is when it has to be.
+ */
+#ifndef REFLOW_TEMP_FAKE_INIT_FAILURES
+#define REFLOW_TEMP_FAKE_INIT_FAILURES 0
+#endif
+
 /* Room temperature: what a healthy sensor reads with the oven cold. */
 #define FAKE_IDLE_MC 25000
 
@@ -95,16 +109,30 @@ uint32_t reflow_temp_fake_reads(void)
 }
 
 /*
- * Always succeeds, and there is no knob to make it fail. The control thread
- * runs this from K_THREAD_DEFINE at boot, before any ztest body -- and before a
- * `setup` hook too -- so an injected init failure could never be set in time to
- * be observed. Covering the no-thermocouple-at-boot path needs the controller to
- * retry initialisation, which is a production change and belongs to its own
- * issue, not to a knob here that looks usable and is not.
+ * Fails the first REFLOW_TEMP_FAKE_INIT_FAILURES times, then succeeds.
+ *
+ * The count is a build-time value and not a runtime knob, and the difference is
+ * the whole point: the control thread runs this from K_THREAD_DEFINE at boot,
+ * before any ztest body and before a `setup` hook, so nothing set at runtime
+ * could ever be in place in time. A knob that looks usable and is not is what
+ * RFO-G17 removed from this file; this replaces it with something that is fixed
+ * before the first line of the image runs.
+ *
+ * Default 0, so tests/controller sees a front-end that is simply there. The
+ * cold-start image in tests/coldstart builds the same file with 1 and watches
+ * the controller recover without a reboot (RFO-B39).
  */
+static uint8_t init_failures_left = REFLOW_TEMP_FAKE_INIT_FAILURES;
+
 int reflow_temp_init(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
+
+	if (init_failures_left > 0U) {
+		init_failures_left--;
+		k_spin_unlock(&lock, key);
+		return -ENODEV;
+	}
 
 	reflow_spike_reset(&fake.spike);
 	k_spin_unlock(&lock, key);
