@@ -210,6 +210,7 @@ jobs:
             board: rpi_pico2/rp2350a/m33
             toolchain: arm-zephyr-eabi
             overlay: app/overlays/rpi_pico2_display_encoder.overlay
+            snippet: usb-webui
             flags: "-DCONFIG_REFLOW_NET=n -DCONFIG_REFLOW_UI_DISPLAY=y -DCONFIG_REFLOW_UI_INPUT=y -DCONFIG_REFLOW_SHELL=y"
           - nome: esp32-wifi
             board: esp32_devkitc/esp32/procpu
@@ -273,8 +274,15 @@ jobs:
               exit 1; }
             EXTRA="-DEXTRA_DTC_OVERLAY_FILE=$PWD/${{ matrix.overlay }}"
           fi
+          SNIP=""
+          if [ -n "${{ matrix.snippet }}" ]; then
+            test -d "$PWD/app/snippets/${{ matrix.snippet }}" || {
+              echo "::error::snippet nao encontrado: ${{ matrix.snippet }}"
+              exit 1; }
+            SNIP="-S ${{ matrix.snippet }}"
+          fi
           west build -p always -b ${{ matrix.board }} -d build/${{ matrix.nome }} \
-            app -- $EXTRA ${{ matrix.flags }}
+            $SNIP app -- $EXTRA ${{ matrix.flags }}
 
   processo:
     # Verifica que o PR respeita o contrato antes de gastar tempo de revisao.
