@@ -26,6 +26,7 @@ ZBUS_CHAN_DEFINE(reflow_telemetry_chan, struct reflow_telemetry,
 #define SAMPLE_MS  CONFIG_REFLOW_SAMPLE_PERIOD_MS
 #define PUBLISH_MS CONFIG_REFLOW_PUBLISH_PERIOD_MS
 #define ABS_MAX_MC (CONFIG_REFLOW_ABS_MAX_TEMP_C * 1000)
+#define RETRY_MS   CONFIG_REFLOW_SENSOR_RETRY_MS
 
 /* No 'static' here: K_MSGQ_DEFINE already declares its buffer static. */
 K_MSGQ_DEFINE(cmd_q, sizeof(struct reflow_cmd), 8, 4);
@@ -230,7 +231,7 @@ static void run_step(uint32_t dt_ms, bool new_sample, uint32_t sample_dt_ms)
 
 static void controller_thread(void *a, void *b, void *c)
 {
-	int64_t last_tick, last_publish, last_sample;
+	int64_t last_tick, last_publish, last_sample, last_retry;
 	uint32_t since_sample = 0;
 	bool ready;
 
@@ -247,6 +248,7 @@ static void controller_thread(void *a, void *b, void *c)
 	if (!ready) {
 		enter_fault(REFLOW_FAULT_SENSOR);
 	}
+	last_retry = k_uptime_get();
 
 	last_tick = k_uptime_get();
 	last_publish = last_tick;
@@ -261,6 +263,29 @@ static void controller_thread(void *a, void *b, void *c)
 
 		last_tick = now;
 		since_sample += dt_ms;
+
+		/*
+		 * A front-end that was not there at boot may be there now (RFO-B39).
+		 * Without this the oven that powered up with the thermocouple
+		 * unplugged stays unusable until a reboot: CLEAR_FAULT returns it to
+		 * IDLE, but nothing ever samples again, so temp_valid stays false and
+		 * START is refused for ever - silently, with no fault on screen.
+		 *
+		 * Only outside RUNNING, and that is the whole safety argument: with
+		 * the state machine stopped the SSR is already off (the else branch
+		 * below calls reflow_heater_off() every tick), so re-initialising a
+		 * driver here cannot happen underneath a live element. A run is never
+		 * interrupted either, because a run cannot exist while ready is false.
+		 */
+		if (!ready && ctx.state != REFLOW_STATE_RUNNING &&
+		    now - last_retry >= RETRY_MS) {
+			last_retry = now;
+			if ((reflow_heater_init() == 0) && (reflow_temp_init() == 0)) {
+				ready = true;
+				since_sample = SAMPLE_MS;   /* sample on this tick */
+				LOG_INF("front-end came back; sampling resumes");
+			}
+		}
 
 		if (ready && since_sample >= SAMPLE_MS) {
 			int32_t mc, raw;

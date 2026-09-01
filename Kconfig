@@ -34,6 +34,22 @@ config REFLOW_ABS_MAX_TEMP_C
 	  Firmware backstop, checked independently of the running profile.
 	  It does NOT replace a hardware thermal fuse.
 
+config REFLOW_SENSOR_RETRY_MS
+	int "Retry the sensor front-end every (ms) while it is missing"
+	default 2000
+	range 250 60000
+	help
+	  An oven powered up with the thermocouple unplugged used to stay
+	  unusable until a reboot: the front-end was initialised once, and
+	  nothing ever sampled again, so START was refused for ever with no
+	  fault on screen (RFO-B39). While the front-end is missing the control
+	  thread retries this often, and picks up as soon as the probe is
+	  plugged in.
+
+	  Only while the oven is not running: with the state machine stopped the
+	  SSR is already off, so a driver is never re-initialised underneath a
+	  live element.
+
 config REFLOW_CTRL_STACK_SIZE
 	int "Control thread stack size"
 	default 2048
