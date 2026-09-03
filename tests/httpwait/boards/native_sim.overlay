@@ -1,0 +1,30 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * SIMULATION ONLY -- nothing here describes hardware.
+ *
+ * native_sim already provides a GPIO emulator as gpio0, so unlike the qemu_x86
+ * overlay next to this one there is no controller to declare: only the SSR node
+ * heater.c needs, and its alias. See that file for why the control core is in
+ * an http server suite at all, and why there is no thermocouple node.
+ *
+ * native_sim does not run on Windows (PROCESSO.md section 10), which is why the
+ * qemu_x86 overlay exists as well. Both platforms build the same source.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	reflow_outputs {
+		compatible = "gpio-leds";
+
+		ssr0: ssr_0 {
+			gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+			label = "SSR heater (emulated)";
+		};
+	};
+
+	aliases {
+		reflow-ssr = &ssr0;
+	};
+};

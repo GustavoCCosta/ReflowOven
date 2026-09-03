@@ -1,0 +1,9 @@
+tests:
+  reflow.httpwait:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags: reflow net httpd funcional
+    # The image waits on the compressed fake timeout twice and then on the
+    # server's own poll cadence, so the suite is dominated by sleeping.
+    timeout: 120
