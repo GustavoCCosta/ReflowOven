@@ -614,6 +614,14 @@ ZTEST(reflow_cmdparse, test_indice_de_perfil_fora_da_faixa_e_recusado)
 		zassert_equal(reflow_cmd_parse(queries[i], &cmd),
 			      REFLOW_CMD_PARSE_REJECT,
 			      "%s foi aceito", queries[i]);
+		/* O criterio nao e so recusar: e nao deixar nada para o nucleo
+		 * postar. As sentinelas tem de sobreviver a recusa. */
+		zassert_equal(cmd.id, 0xFFU,
+			      "%s escreveu id=%u sobre a sentinela",
+			      queries[i], (unsigned int)cmd.id);
+		zassert_equal(cmd.arg, -12345,
+			      "%s escreveu arg=%d sobre a sentinela",
+			      queries[i], cmd.arg);
 	}
 }
 
