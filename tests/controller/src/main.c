@@ -188,6 +188,60 @@ ZTEST(reflow_controller, test_open_thermocouple_while_idle_recovers_without_a_cl
 }
 
 /*
+ * RFO-T17: the oven powered up with nothing plugged in refuses to run, and
+ * starts running once the probe is connected -- no reboot, no clear.
+ *
+ * The two neighbours above each hold one half of this and neither holds the
+ * join. test_spi_error_while_idle_only_refuses_to_start refuses a START, but
+ * after an SPI error (-EIO), which is a bus fault and not the missing probe of
+ * this ticket; test_open_thermocouple_while_idle_recovers_without_a_clear uses
+ * the right failure (-ENOENT, what the MAX6675 driver reports for an open
+ * junction) but never asks the oven to run, so it says nothing about the START
+ * gate. What had no coverage at all is the last step of the manual procedure:
+ * plug the thermocouple in and START is ACCEPTED.
+ *
+ * Both directions matter, and they fail in opposite ways. A gate that forgets
+ * to check the reading starts a run blind, with the element energised and
+ * nothing to close the loop. A gate that never lets go strands an oven that has
+ * a perfectly good probe on it -- the defect RFO-B39 fixed on the fault path,
+ * which is why it is worth pinning here on the command path too.
+ */
+ZTEST(reflow_controller, test_start_needs_a_reading_and_gets_it_when_the_probe_arrives)
+{
+	struct reflow_telemetry t;
+
+	/* Step 1 and 2: no probe, and the oven is asked to run. */
+	reflow_temp_fake_fail(-ENOENT);
+	zassert_true(wait_for(temp_valid_is, 0, &t),
+		     "reading still marked valid with the probe disconnected");
+
+	post(REFLOW_CMD_START, 0);
+	k_msleep(1000);
+
+	zassert_ok(zbus_chan_read(&reflow_telemetry_chan, &t, K_MSEC(200)), NULL);
+	zassert_equal(t.state, REFLOW_STATE_IDLE,
+		      "the oven started with no thermocouple (state %s)",
+		      reflow_state_str(t.state));
+	zassert_false(reflow_heater_is_on(),
+		      "element energised with no thermocouple");
+	zassert_equal(t.fault, REFLOW_FAULT_NONE,
+		      "refusing a START while idle latched %s, so the operator "
+		      "would need a clear before the oven could ever run",
+		      reflow_fault_str(t.fault));
+
+	/* Steps 3 and 4: the probe is connected, and now the oven may run. */
+	reflow_temp_fake_fail(0);
+	zassert_true(wait_for(temp_valid_is, 1, &t),
+		     "reading did not come back after the probe was connected");
+
+	post(REFLOW_CMD_START, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t),
+		     "the oven refused to run with a healthy probe (state %s, "
+		     "fault %s)", reflow_state_str(t.state),
+		     reflow_fault_str(t.fault));
+}
+
+/*
  * Losing the sensor mid-run is the dangerous case: the element can be on and
  * the loop is blind. It has to latch and stay latched until an explicit clear.
  */
