@@ -296,9 +296,19 @@ ZTEST(reflow_controller, test_absolute_cut_out_trips_with_the_oven_idle)
 	/*
 	 * And it is a latch, not a warning: the oven stays refused until an
 	 * explicit clear, which is what the README promises for all four
-	 * faults. The reading is left where it is on purpose -- a START
-	 * accepted here would be a run beginning above the hard limit.
+	 * faults.
+	 *
+	 * The reading has to come back to a safe value FIRST, and that is the
+	 * whole point of these three lines (RFO-T12 review). Leaving it above
+	 * the limit makes the assertion below unable to fail: ending in FAULT
+	 * after the START would happen both when the latch refused the command
+	 * and when the command was accepted and the backstop above simply
+	 * re-tripped on the next sample. With the oven cool again the backstop
+	 * has nothing to say, so FAULT can only mean the latch held.
 	 */
+	reflow_temp_fake_set_raw_mc(25000);
+	wait_samples(2);
+
 	post(REFLOW_CMD_START, 0);
 	k_msleep(1000);
 
