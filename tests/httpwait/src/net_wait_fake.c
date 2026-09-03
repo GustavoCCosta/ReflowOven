@@ -70,3 +70,8 @@ uint32_t reflow_net_wait_fake_calls(void)
 {
 	return (uint32_t)atomic_get(&calls);
 }
+
+bool reflow_net_wait_fake_stack_ready(void)
+{
+	return stack_has_an_address();
+}

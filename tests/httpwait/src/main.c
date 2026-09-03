@@ -145,6 +145,10 @@ ZTEST(reflow_httpwait, test_ui_web_funciona_com_link_atrasado)
 	char buf[512];
 	int n;
 
+	zassert_true(wait_for(reflow_net_wait_fake_stack_ready, SETTLE_MS),
+		     "a imagem nao tem interface para escutar: 127.0.0.1 nao esta "
+		     "registrado. Isso e configuracao desta suite (NET_DRIVERS, "
+		     "NET_LOOPBACK), nao o servidor");
 	zassert_true(wait_for(server_is_listening, SETTLE_MS),
 		     "nada escutando em :%d depois de %d ms",
 		     CONFIG_REFLOW_NET_HTTP_PORT, SETTLE_MS);

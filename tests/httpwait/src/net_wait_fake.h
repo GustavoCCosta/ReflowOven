@@ -17,6 +17,7 @@
 #ifndef REFLOW_NET_WAIT_FAKE_H_
 #define REFLOW_NET_WAIT_FAKE_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -35,5 +36,13 @@
 
 /* How many times reflow_net_wait_ready() has been called. */
 uint32_t reflow_net_wait_fake_calls(void);
+
+/*
+ * Whether the image has an interface the server could bind to - the
+ * condition the fake itself waits for. Exposed so a test can tell the two
+ * failures apart: a server that gave up on the link, and an image whose
+ * network stack was never there (a Kconfig regression, not a firmware one).
+ */
+bool reflow_net_wait_fake_stack_ready(void);
 
 #endif /* REFLOW_NET_WAIT_FAKE_H_ */
