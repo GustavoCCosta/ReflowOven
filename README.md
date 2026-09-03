@@ -54,6 +54,7 @@ means flipping the symbol to `n`.
 | `tests/boot/` | ztest suite for the SSR gate's state at boot, on the GPIO emulator |
 | `tests/controller/` | ztest suite for the control core, against an injectable thermocouple (`src/temp_fake.c` in place of `src/core/temp.c`) |
 | `tests/coldstart/` | ztest suite for the oven that boots with no thermocouple: same image as `tests/controller`, built with the fake's init failing once |
+| `tests/httpwait/` | ztest suite for the web UI when the link comes up late: `httpd.c` as flashed, over the software loopback, with an injectable link gate (`src/net_wait_fake.c` in place of `src/net/l4.c`) |
 | `tools/host_sim.c` | Closed-loop simulation of the same logic on the build host |
 | `tools/test_page.js` | Optional: `node tools/test_page.js` smoke tests the page's transport choice and rendering |
 
@@ -397,6 +398,16 @@ a made-up temperature is a foot-gun on a mains heater, so the substitution
 happens at link time, in that suite's `CMakeLists.txt`, and nowhere else. The
 fake still runs the real `tempguard.c` filter over the injected value, so a
 suppressed spike is suppressed there exactly as it would be on hardware.
+
+`tests/httpwait/` does the same thing one layer out: `src/net/httpd.c` as it is
+flashed, with `tests/httpwait/src/net_wait_fake.c` in place of `src/net/l4.c`.
+l4.c is the file that listens to `NET_EVENT_L4_*`, and on a simulated platform
+no link ever comes up, so the fake reports a timeout a build-time number of
+times and then declares the link usable. The suite then connects to the server
+over the software loopback and reads `/api/state`, which is the whole property:
+a link that appears late still ends in a working web UI (RFO-B11). No link
+module is in the image -- that the wait does not care which link it is waiting
+for is exactly what l4.c exists to provide.
 
 Closed-loop check with a first-order oven model, no hardware and no Zephyr:
 

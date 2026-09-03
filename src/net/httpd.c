@@ -48,6 +48,9 @@ LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
  */
 #define SEND_SLICE_MS 100
 
+/* How often the thread logs that the link has not come up yet. */
+#define LINK_WAIT K_MINUTES(5)
+
 #define IDLE_BUDGET_MS CONFIG_REFLOW_NET_IDLE_BUDGET_MS
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
@@ -366,9 +369,22 @@ static void httpd_thread(void *a, void *b, void *c)
 		clients[i].fd = -1;
 	}
 
-	if (reflow_net_wait_ready(K_MINUTES(5)) != 0) {
-		LOG_WRN("no network after 5 min, http server not started");
-		return;
+	/*
+	 * RFO-B11. This used to be a single bounded wait that gave up and
+	 * returned: after it, no listening socket, no event stream and no
+	 * remote Stop until a power cycle. On the USB link the carrier only
+	 * comes up when a host enumerates the device, so an oven powered from
+	 * a wall charger and plugged into the notebook later than the window
+	 * lost its web UI for the rest of the session -- and so did one whose
+	 * access point took longer than that to come back after a power cut.
+	 *
+	 * The wait is now unbounded. LINK_WAIT is no longer a deadline, only
+	 * how often the thread says out loud that it is still waiting: the
+	 * link module (wifi.c or usb_net.c) keeps working on it, and this
+	 * thread has nothing to do until it succeeds.
+	 */
+	while (reflow_net_wait_ready(LINK_WAIT) != 0) {
+		LOG_WRN("no network yet, http server still waiting for the link");
 	}
 
 	srv = listen_socket();
