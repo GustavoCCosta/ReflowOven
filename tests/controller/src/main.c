@@ -249,6 +249,66 @@ ZTEST(reflow_controller, test_a_stuck_reading_does_not_blind_the_absolute_cut_ou
 	zassert_false(reflow_heater_is_on(), "element still energised after over-temperature");
 }
 
+/*
+ * RFO-T12: the absolute cut-out is a backstop, not a step of a run.
+ *
+ * The neighbouring test above proves the raw path trips it, but it does so
+ * with the oven RUNNING, so it says nothing about an idle oven. That
+ * distinction is not academic: an oven can be hot with no run in progress --
+ * the run has just ended, or a STOP came in while the chamber was at peak, or
+ * the element is stuck closed by a welded SSR contact and nothing in software
+ * ever asked for heat. In every one of those the reading above
+ * CONFIG_REFLOW_ABS_MAX_TEMP_C is the only warning available, and the guard in
+ * controller.c is deliberately written as "any state except FAULT" rather than
+ * "while running".
+ *
+ * So: no START anywhere in this test. The oven sits idle, the sample goes one
+ * degree past the limit, and the fault has to latch anyway.
+ *
+ * The step from the fake's 25 degC idle is far larger than
+ * REFLOW_SPIKE_MAX_STEP_MC, so the real filter in tempguard.c holds the
+ * reported value still and the trip can only come from the raw sample -- the
+ * same asymmetry the previous test relies on, which is why the filtered value
+ * is asserted to still be below the limit here too.
+ */
+ZTEST(reflow_controller, test_absolute_cut_out_trips_with_the_oven_idle)
+{
+	struct reflow_telemetry t;
+
+	zassert_ok(zbus_chan_read(&reflow_telemetry_chan, &t, K_MSEC(200)), NULL);
+	zassert_equal(t.state, REFLOW_STATE_IDLE,
+		      "this test only means something from idle, and the oven is %s",
+		      reflow_state_str(t.state));
+
+	reflow_temp_fake_set_raw_mc(ABS_MAX_MC + 1000);
+
+	zassert_true(wait_for(is_fault, REFLOW_FAULT_OVERTEMP, &t),
+		     "the oven read %d mC while idle and stayed in %s/%s: the "
+		     "backstop only fires during a run",
+		     ABS_MAX_MC + 1000, reflow_state_str(t.state),
+		     reflow_fault_str(t.fault));
+	zassert_true(t.temp_mc < ABS_MAX_MC,
+		     "the filtered reading (%d mC) had already passed the limit, so "
+		     "this says nothing about the raw path", t.temp_mc);
+	zassert_false(reflow_heater_is_on(),
+		      "element still energised after over-temperature while idle");
+
+	/*
+	 * And it is a latch, not a warning: the oven stays refused until an
+	 * explicit clear, which is what the README promises for all four
+	 * faults. The reading is left where it is on purpose -- a START
+	 * accepted here would be a run beginning above the hard limit.
+	 */
+	post(REFLOW_CMD_START, 0);
+	k_msleep(1000);
+
+	zassert_ok(zbus_chan_read(&reflow_telemetry_chan, &t, K_MSEC(200)), NULL);
+	zassert_equal(t.state, REFLOW_STATE_FAULT,
+		      "START was accepted with the over-temperature fault latched "
+		      "(state %s)", reflow_state_str(t.state));
+	zassert_false(reflow_heater_is_on(), "element energised from a latched fault");
+}
+
 /* A cleared fault has to give the oven back, not brick it until reboot. */
 ZTEST(reflow_controller, test_a_cleared_fault_allows_a_new_run)
 {
