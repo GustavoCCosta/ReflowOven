@@ -59,4 +59,11 @@ if(CONFIG_REFLOW_LINK_WIFI_AP AND "${CONFIG_REFLOW_AP_PSK}" STREQUAL "")
     "Never commit it (PROCESSO section 8).")
 endif()
 
+# The page the HTTP server serves is generated, not committed - see the file
+# for why. Only the builds that contain httpd.c need it.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/index_html.cmake)
+if(CONFIG_REFLOW_NET)
+  reflow_generate_index_html(${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 target_include_directories(app PRIVATE src)

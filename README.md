@@ -47,7 +47,7 @@ means flipping the symbol to `n`.
 | `src/net/wifi.c` | Link: Wi-Fi station (`CONFIG_REFLOW_LINK_WIFI`) |
 | `src/net/usb_net.c` | Link: USB Ethernet, CDC ECM plus a one-address DHCP server (`CONFIG_REFLOW_LINK_USB_ECM`) |
 | `src/telemetry_json.c` | The one telemetry-to-JSON formatter, shared by the server, the shell and host tools |
-| `src/net/index.html`, `index_html.h` | The page, in both transports; regenerate the header with `tools/gen_page.py` |
+| `src/net/index.html` | The page, in both transports. `index_html.h` is generated into the build tree by `cmake/index_html.cmake` - do not commit it |
 | `src/shell_cmds.c` | `reflow status\|start\|stop\|clear\|profile` (`CONFIG_REFLOW_SHELL`) |
 | `snippets/usb-webui/` | `-S usb-webui`: the overlay and conf for the USB link |
 | `tests/logic/` | ztest suite for the PID and the profile machine |

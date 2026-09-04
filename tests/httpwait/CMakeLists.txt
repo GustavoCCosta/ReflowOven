@@ -54,5 +54,11 @@ target_sources(app PRIVATE
 #
 target_compile_definitions(app PRIVATE REFLOW_NET_WAIT_FAKE_FAILURES=2)
 
+# Same generated page as the firmware, from the same rule (RFO-B25): this
+# image links httpd.c, so it needs index_html.h too, and a second copy of
+# the recipe here is a second thing to drift.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/index_html.cmake)
+reflow_generate_index_html(${CMAKE_CURRENT_SOURCE_DIR}/../..)
+
 target_include_directories(app PRIVATE ${SRC} ${CORE} ${SRC}/net ${FAKE}
                                        ${CMAKE_CURRENT_SOURCE_DIR}/src)
