@@ -76,6 +76,11 @@ static bool temp_reads(const struct reflow_telemetry *t, int arg)
 	return t->temp_valid != 0U && t->temp_mc == (int32_t)arg;
 }
 
+static bool profile_is(const struct reflow_telemetry *t, int arg)
+{
+	return t->profile_idx == (uint8_t)arg;
+}
+
 static void post(uint8_t id, int32_t arg)
 {
 	struct reflow_cmd cmd = { .id = id, .arg = arg };
@@ -112,6 +117,14 @@ static void fresh_idle(void *unused)
 
 	reflow_temp_fake_reset();
 	wait_samples(2);
+	/*
+	 * E o perfil ativo tambem: ele nao e estado do sensor, e um teste que
+	 * troca de perfil (RFO-T19) ou que roda uma corrida com outro
+	 * (RFO-T47) deixava o proximo comecando com o perfil de alguem. Isso
+	 * nunca quebrou nada por sorte: as duas primeiras tabelas tem tempos
+	 * nominais parecidos.
+	 */
+	post(REFLOW_CMD_SELECT_PROFILE, 0);
 	post(REFLOW_CMD_STOP, 0);
 	post(REFLOW_CMD_CLEAR_FAULT, 0);
 
@@ -477,6 +490,59 @@ ZTEST(reflow_controller, test_absolute_cut_out_trips_with_the_run_finished)
 	 */
 	reflow_temp_fake_set_raw_mc(25000);
 	wait_samples(4);
+}
+
+/*
+ * RFO-T19: trocar de perfil no meio de uma corrida e recusado, e o perfil ativo
+ * nao muda.
+ *
+ * O que esta em jogo nao e a arrumacao do estado: reflow_run_start() copia o
+ * ponteiro do perfil e a corrida em andamento passa a andar por ele. Aceitar a
+ * troca no meio deixaria a maquina de estagios com os alvos e os tempos de uma
+ * tabela e o historico da outra -- um "peak" de 245 degC dentro de uma corrida
+ * que o operador pediu a 120 degC, sem nada na telemetria dizendo que isso
+ * aconteceu.
+ *
+ * As duas direcoes importam. Uma guarda que suma aceita a troca no meio; uma
+ * guarda larga demais trava o seletor para sempre, e o operador fica com um
+ * forno que so roda o perfil da ultima corrida. A segunda metade deste teste
+ * existe para essa, e e ela que fica verde na mutacao do item 4.
+ */
+ZTEST(reflow_controller, test_profile_switch_is_refused_during_a_run)
+{
+	struct reflow_telemetry t;
+
+	/* Ponto de partida explicito: o setup ja devolve o perfil 0, mas este
+	 * teste e sobre indices e nao deve depender disso de longe. */
+	post(REFLOW_CMD_SELECT_PROFILE, 0);
+	zassert_true(wait_for(profile_is, 0, &t), "o perfil 0 nao ficou ativo");
+
+	post(REFLOW_CMD_START, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t), "the run did not start");
+
+	post(REFLOW_CMD_SELECT_PROFILE, 1);
+	k_msleep(1000);
+
+	zassert_ok(zbus_chan_read(&reflow_telemetry_chan, &t, K_MSEC(200)), NULL);
+	zassert_equal(t.profile_idx, 0,
+		      "o perfil trocou para %u no meio da corrida", t.profile_idx);
+	zassert_equal(t.state, REFLOW_STATE_RUNNING,
+		      "a corrida virou %s por causa de um comando recusado",
+		      reflow_state_str(t.state));
+
+	/*
+	 * E fora da corrida a troca vale. Sem isto, uma guarda que recusasse
+	 * SEMPRE passaria neste teste, e o defeito seria um forno preso ao
+	 * perfil da ultima corrida.
+	 */
+	post(REFLOW_CMD_STOP, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_IDLE, &t), "o STOP nao parou o forno");
+
+	post(REFLOW_CMD_SELECT_PROFILE, 1);
+	zassert_true(wait_for(profile_is, 1, &t),
+		     "o forno recusou a troca de perfil com a corrida parada "
+		     "(perfil %u, estado %s)", t.profile_idx,
+		     reflow_state_str(t.state));
 }
 
 /* A cleared fault has to give the oven back, not brick it until reboot. */
