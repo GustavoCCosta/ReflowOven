@@ -3,7 +3,11 @@ tests:
     platform_allow:
       - native_sim
       - qemu_x86
-    tags: reflow controller temp seguranca
+    tags:
+      - reflow
+      - controller
+      - temp
+      - seguranca
     # Waits on the retry interval and the sampling cadence of the real control
     # thread, so the suite is dominated by sleeping.
     timeout: 120
