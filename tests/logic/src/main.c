@@ -677,6 +677,100 @@ ZTEST(reflow_cmdparse, test_validacao_nao_engole_um_stop)
 	zassert_equal(cmd.arg, 0, "arg deveria ser zerado para um stop");
 }
 
+/*
+ * RFO-B40. O irmao do B10: aquele fechou a porta do indice fora da faixa e esta
+ * ficou aberta. "id=profile" sem arg nenhum devolvia OK com cmd.arg == 0, a API
+ * respondia 204 e o nucleo trocava o perfil ativo para o indice 0 -- o SAC305,
+ * que vai a 245 degC. O operador via o pedido aceito; o forno fazia outra coisa.
+ *
+ * A diferenca que este teste guarda e entre "nao pediu perfil nenhum" e "pediu o
+ * perfil 0". Sao a mesma coisa para o parser antigo porque arg comeca em 0, e
+ * sao coisas opostas para quem esta olhando a placa.
+ */
+ZTEST(reflow_cmdparse, test_perfil_sem_arg_e_recusado)
+{
+	static const char *const queries[] = {
+		"id=profile",             /* o caso do ticket */
+		"id=profile&argx=256",    /* mesma coisa com a chave errada */
+		"arg=2&id=profile&argx=1" /* arg presente, mas nao e o do comando... */
+	};
+	struct reflow_cmd cmd;
+
+	for (size_t i = 0; i < ARRAY_SIZE(queries) - 1; i++) {
+		cmd.id = 0xFF;
+		cmd.arg = -12345;
+		zassert_equal(reflow_cmd_parse(queries[i], &cmd),
+			      REFLOW_CMD_PARSE_REJECT,
+			      "%s selecionou um perfil sem ninguem ter pedido",
+			      queries[i]);
+		zassert_equal(cmd.id, 0xFFU,
+			      "%s escreveu id=%u sobre a sentinela",
+			      queries[i], (unsigned int)cmd.id);
+		zassert_equal(cmd.arg, -12345,
+			      "%s escreveu arg=%d sobre a sentinela",
+			      queries[i], cmd.arg);
+	}
+
+	/* ...e a ultima da lista tem arg de verdade: e valida, e continua sendo. */
+	cmd.arg = -12345;
+	zassert_equal(reflow_cmd_parse(queries[2], &cmd), REFLOW_CMD_PARSE_OK,
+		      "%s foi recusada: uma chave desconhecida nao invalida o arg",
+		      queries[2]);
+	zassert_equal(cmd.arg, 2, "%s virou arg=%d", queries[2], cmd.arg);
+}
+
+/*
+ * O outro lado da mesma linha: pedir o perfil 0 explicitamente continua valendo.
+ * Sem esta asserção, "recusar quando arg falta" e "recusar o indice 0" passariam
+ * pelo mesmo teste, e o segundo seria um forno que nao consegue mais rodar o
+ * primeiro perfil da tabela.
+ */
+ZTEST(reflow_cmdparse, test_perfil_zero_pedido_de_proposito_continua_aceito)
+{
+	struct reflow_cmd cmd;
+
+	cmd.arg = -12345;
+	zassert_equal(reflow_cmd_parse("id=profile&arg=0", &cmd),
+		      REFLOW_CMD_PARSE_OK, "arg=0 explicito foi recusado");
+	zassert_equal(cmd.id, REFLOW_CMD_SELECT_PROFILE, NULL);
+	zassert_equal(cmd.arg, 0, "arg=0 explicito virou arg=%d", cmd.arg);
+}
+
+/*
+ * A exigencia de arg e do profile e de mais ninguem. Este e o teste que fica
+ * VERDE sob a mutacao do item 4 e vermelho se o patch for largo demais: um
+ * "todo comando precisa de arg" quebraria o stop, que e a unica falha que este
+ * endpoint nao pode ter.
+ */
+ZTEST(reflow_cmdparse, test_exigencia_de_arg_nao_alcanca_os_outros_comandos)
+{
+	static const uint8_t esperado[] = {
+		REFLOW_CMD_STOP, REFLOW_CMD_START, REFLOW_CMD_CLEAR_FAULT,
+	};
+	static const char *const queries[] = {
+		"id=stop", "id=start", "id=clear",
+	};
+	struct reflow_cmd cmd;
+
+	for (size_t i = 0; i < ARRAY_SIZE(queries); i++) {
+		cmd.id = 0xFF;
+		cmd.arg = -12345;
+		zassert_equal(reflow_cmd_parse(queries[i], &cmd),
+			      REFLOW_CMD_PARSE_OK,
+			      "%s virou malformado por falta de arg", queries[i]);
+		zassert_equal(cmd.id, esperado[i], "%s devolveu id=%u",
+			      queries[i], (unsigned int)cmd.id);
+		zassert_equal(cmd.arg, 0, "%s devolveu arg=%d", queries[i], cmd.arg);
+	}
+
+	/* Ambigua e sem arg: ainda tem de parar o forno. */
+	cmd.id = 0xFF;
+	zassert_equal(reflow_cmd_parse("id=stop&id=profile", &cmd),
+		      REFLOW_CMD_PARSE_REJECT_STOP,
+		      "um stop foi engolido pela exigencia de arg");
+	zassert_equal(cmd.id, REFLOW_CMD_STOP, "o comando devolvido nao e um stop");
+}
+
 ZTEST_SUITE(reflow_cmdparse, NULL, NULL, NULL, NULL, NULL);
 
 /* ------------------------------------------------------ command authorisation */
