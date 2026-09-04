@@ -51,6 +51,24 @@ LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
 /* How often the thread logs that the link has not come up yet. */
 #define LINK_WAIT K_MINUTES(5)
 
+/*
+ * RFO-B15. The loop below polls the listening socket plus every open
+ * connection, so the poll limit has to cover MAX_CLIENTS + 1. Below that,
+ * zsock_poll() answers -EINVAL as soon as enough clients are connected: the
+ * error path sleeps and continues, so the server spins filling the log and
+ * serves nobody - no page, no telemetry, no remote Stop - on a configuration
+ * the range allows and a build that says nothing.
+ *
+ * A build-time check and not a comment, because the Kconfig side of this is
+ * easy to get wrong in a way nothing reports: the app's configdefault for
+ * ZVFS_POLL_MAX sat after `source "Kconfig.zephyr"` and never applied, so the
+ * firmware shipped with the upstream 3 while the file claimed 8.
+ */
+BUILD_ASSERT(CONFIG_ZVFS_POLL_MAX >= MAX_CLIENTS + 1,
+	     "CONFIG_ZVFS_POLL_MAX must cover CONFIG_REFLOW_NET_MAX_CLIENTS plus "
+	     "the listening socket, or zsock_poll() fails for ever once the "
+	     "clients are there (RFO-B15)");
+
 #define IDLE_BUDGET_MS CONFIG_REFLOW_NET_IDLE_BUDGET_MS
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
