@@ -292,8 +292,27 @@ ZTEST(reflow_controller, test_sensor_loss_during_a_run_latches_and_cuts_the_elem
 		      t.duty_permille);
 	zassert_false(reflow_heater_is_on(), "element still energised after a sensor fault");
 
-	/* The latch: START must bounce off it even once the sensor is back. */
+	/*
+	 * The latch: START must bounce off it even once the sensor is back.
+	 *
+	 * RFO-G24. Waiting for the reading to be valid AGAIN is what makes the
+	 * assertion below able to fail. reflow_temp_fake_fail(0) only stops the
+	 * fake from erring; ctx.temp_valid comes back on the next successful
+	 * sample, up to a sampling period later. Posting START before that had
+	 * handle_cmd() refuse it on "no valid temperature yet" - the oven stayed
+	 * in FAULT, the assertion passed, and it said nothing whatsoever about
+	 * the latch. Measured, not assumed: with the latch deleted from
+	 * handle_cmd(), the firmware log showed
+	 *
+	 *     W: start refused: no valid temperature yet
+	 *
+	 * immediately before this test PASSED.
+	 */
 	reflow_temp_fake_fail(0);
+	zassert_true(wait_for(temp_valid_is, 1, &t),
+		     "a leitura nao voltou a ser valida: o START seguinte seria"
+		     " recusado por falta de temperatura e nao pela trava");
+
 	post(REFLOW_CMD_START, 0);
 	k_msleep(1000);
 
