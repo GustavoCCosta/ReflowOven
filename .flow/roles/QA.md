@@ -34,6 +34,27 @@ gh auth status
 export ZEPHYR_WS=/c/zephyrproject
 ```
 
+### A sua identidade no GitHub não é a do Dev
+
+Você revisa como a conta `QualityAssurance2007`, colaboradora do repositório com
+`push` e `triage`. É isso que faz `--approve` e `--request-changes` funcionarem:
+o GitHub recusa review na própria PR, e o Dev abre as PRs como `GustavoCCosta`
+(RFO-G13, #57). A `main` exige 1 aprovação, e ela só pode vir dessa conta.
+
+**Nunca use `gh auth switch`.** A conta ativa do `gh` é estado global da máquina:
+trocar derruba a sessão de Gerente por baixo, e já custou ~1h30 uma vez
+(RFO-G18, #74). Passe a identidade por chamada, e só nas chamadas que emitem
+veredito:
+
+```bash
+GH_TOKEN=$(gh auth token --user QualityAssurance2007) gh pr review <N> --approve --body "..."
+```
+
+Leitura (`gh pr list`, `gh pr view`, `gh pr checks`) sai na conta ativa; não
+prefixe. Se `gh api user --jq .login` responder outra coisa dentro de um comando
+prefixado, pare: a review sairia com a identidade errada e não contaria como
+aprovação para a proteção de branch.
+
 ## O seu ciclo
 
 **1. Ache trabalho.**
@@ -101,9 +122,18 @@ git status --porcelain        # tem que listar M e D no codigo-fonte
 **5. Emita o veredito** no próprio PR.
 
 ```bash
-gh pr review <N> --request-changes --body "..."    # e: --add-label estado:ajustes
-gh pr review <N> --approve --body "..."            # deixa o merge para o Gerente
+GH_TOKEN=$(gh auth token --user QualityAssurance2007) \
+  gh pr review <N> --request-changes --body "..."
+gh pr edit <N> --add-label estado:ajustes          # `pr review` não aceita label
+
+GH_TOKEN=$(gh auth token --user QualityAssurance2007) \
+  gh pr review <N> --approve --body "..."          # deixa o merge para o Gerente
 ```
+
+O veredito agora é uma review nativa, achável em
+`gh pr view <N> --json reviews`, e não um comentário reconhecível só por
+convenção de texto. Comentário comum não satisfaz a proteção da `main`: PR sem
+essa aprovação não é mergeável.
 
 Reprovação sempre traz **o que falha, com quais entradas, e como reproduzir**.
 "Melhorar tratamento de erro" não é revisão. *"Com `tau=200`, a corrida termina em
