@@ -199,6 +199,27 @@ config REFLOW_LINK_USB_ECM
 	  module initialises the USB device stack itself (registering the
 	  shell's CDC ACM function along with the Ethernet one).
 
+config REFLOW_LINK_WIFI_AP
+	bool "Wi-Fi access point (SoftAP)"
+	select WIFI
+	# Same reason as the station link: this module calls
+	# net_mgmt(NET_REQUEST_WIFI_AP_ENABLE), whose handler lives in the Wi-Fi
+	# L2 management layer, and WIFI alone does not bring it in.
+	select NET_L2_WIFI_MGMT
+	# The oven hands out addresses on its own network, exactly as it does on
+	# the USB link.
+	select NET_DHCPV4_SERVER
+	help
+	  The oven IS the network: it broadcasts its own SSID and serves the web
+	  UI at a fixed address, so a phone or a laptop joins it directly with no
+	  existing Wi-Fi around. Needs a radio: fine on ESP32, not available on a
+	  bare RP2350.
+
+	  This puts start and stop of a mains heater within radio range of
+	  anyone, so it refuses to come up until REFLOW_AP_PSK is set, and it
+	  logs at error level while CONFIG_REFLOW_NET_TOKEN is empty (commands
+	  answer 503, telemetry is still served).
+
 endchoice
 
 if REFLOW_LINK_USB_ECM
@@ -235,6 +256,43 @@ config REFLOW_USB_PRODUCT
 	default "Reflow oven"
 
 endif # REFLOW_LINK_USB_ECM
+
+if REFLOW_LINK_WIFI_AP
+
+config REFLOW_AP_SSID
+	string "SSID the oven broadcasts"
+	default "reflow-oven"
+	help
+	  1 to 32 characters. Not a secret, so it has a working default.
+
+config REFLOW_AP_PSK
+	string "Passphrase of the oven's network"
+	default ""
+	help
+	  WPA2 passphrase, 8 to 63 characters. EMPTY BY DESIGN: a passphrase is
+	  a secret and secrets do not live in a versioned file (PROCESSO §8), so
+	  there is no working default to inherit by accident.
+
+	  While it is empty the access point does NOT come up - the oven says so
+	  at error level every boot and the web UI stays off. That is deliberate:
+	  an oven broadcasting an open network is an oven anyone in range can
+	  turn on, and a freshly flashed board is exactly the one with nothing
+	  set. Pass it at build time (`-DCONFIG_REFLOW_AP_PSK="..."`) or from a
+	  conf fragment you do not commit.
+
+config REFLOW_AP_IPV4_ADDR
+	string "Oven address on its own network"
+	default "192.168.4.1"
+
+config REFLOW_AP_IPV4_MASK
+	string "Netmask of the oven's network"
+	default "255.255.255.0"
+
+config REFLOW_AP_DHCP_POOL_START
+	string "First address handed to a client"
+	default "192.168.4.2"
+
+endif # REFLOW_LINK_WIFI_AP
 
 config REFLOW_NET_TOKEN
 	string "Shared secret required to command the oven over HTTP"
@@ -371,7 +429,7 @@ configdefault HEAP_MEM_POOL_SIZE
 # Espressif Wi-Fi driver: the symbol only exists on Espressif SoCs, so this is
 # a no-op on any other target.
 configdefault WIFI_ESP32
-	default y if REFLOW_LINK_WIFI
+	default y if REFLOW_LINK_WIFI || REFLOW_LINK_WIFI_AP
 
 configdefault NET_L2_ETHERNET
 	default y if REFLOW_NET

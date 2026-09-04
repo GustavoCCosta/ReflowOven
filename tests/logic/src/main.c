@@ -17,6 +17,7 @@
 #include "net/httpgate.h"
 #include "net/profiles_json.h"
 #include "net/sendbudget.h"
+#include "net/wifi_ap_cfg.h"
 #include "tempguard.h"
 
 /* ------------------------------------------------------------------ PID */
@@ -772,6 +773,95 @@ ZTEST(reflow_cmdparse, test_exigencia_de_arg_nao_alcanca_os_outros_comandos)
 }
 
 ZTEST_SUITE(reflow_cmdparse, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------------------- ponto de acesso */
+
+/*
+ * RFO-F07. A decisao que precede ligar o radio: com esta configuracao, o forno
+ * pode virar um ponto de acesso?
+ *
+ * O caso que importa e o do PSK vazio, que e o default do repositorio de
+ * proposito (secreto nao entra em arquivo versionado). Ele NAO e usavel: um
+ * forno que sobe um AP aberto e um forno que qualquer um no raio do radio
+ * liga, e a placa recem-gravada e exatamente a que nao tem nada configurado.
+ *
+ * Os limites nao sao regra da casa, sao do WPA2: passphrase ASCII de 8 a 63
+ * caracteres, SSID de 1 a 32 octetos. Fora disso o radio recusa, e descobrir
+ * isso por linha de log com o forno fechado e pior que descobrir no boot.
+ */
+ZTEST(reflow_wifi_ap, test_configuracao_completa_e_usavel)
+{
+	enum reflow_ap_cfg cfg = reflow_wifi_ap_check("reflow-oven", "senha-boa-123");
+
+	zassert_equal(cfg, REFLOW_AP_CFG_OK, "%s", reflow_wifi_ap_cfg_str(cfg));
+	zassert_true(reflow_wifi_ap_usable(cfg), NULL);
+}
+
+ZTEST(reflow_wifi_ap, test_psk_vazio_nao_sobe_o_ap)
+{
+	enum reflow_ap_cfg cfg = reflow_wifi_ap_check("reflow-oven", "");
+
+	zassert_equal(cfg, REFLOW_AP_CFG_OPEN,
+		      "PSK vazio classificado como %s", reflow_wifi_ap_cfg_str(cfg));
+	zassert_false(reflow_wifi_ap_usable(cfg),
+		      "o forno subiria um AP aberto: qualquer aparelho no raio do "
+		      "radio entra na rede que serve START e STOP");
+
+	/* NULL e o mesmo caso: nao configurado. */
+	cfg = reflow_wifi_ap_check("reflow-oven", NULL);
+	zassert_false(reflow_wifi_ap_usable(cfg), "PSK NULL virou usavel");
+}
+
+/* Os limites do WPA2, nas duas bordas de cada um. */
+ZTEST(reflow_wifi_ap, test_bordas_do_wpa2)
+{
+	static const char psk7[] = "1234567";
+	static const char psk8[] = "12345678";
+	static const char psk63[] =
+		"123456789012345678901234567890123456789012345678901234567890123";
+	static const char psk64[] =
+		"1234567890123456789012345678901234567890123456789012345678901234";
+
+	zassert_false(reflow_wifi_ap_usable(reflow_wifi_ap_check("oven", psk7)),
+		      "7 caracteres passaram: o radio recusaria");
+	zassert_true(reflow_wifi_ap_usable(reflow_wifi_ap_check("oven", psk8)),
+		     "8 caracteres e o minimo do WPA2 e tem de passar");
+	zassert_true(reflow_wifi_ap_usable(reflow_wifi_ap_check("oven", psk63)),
+		     "63 caracteres e o maximo do WPA2 e tem de passar");
+	zassert_false(reflow_wifi_ap_usable(reflow_wifi_ap_check("oven", psk64)),
+		      "64 caracteres passaram: o radio recusaria");
+
+	zassert_equal(reflow_wifi_ap_check(psk7, psk8), REFLOW_AP_CFG_OK,
+		      "SSID de 7 caracteres deveria servir");
+	zassert_equal(reflow_wifi_ap_check("", psk8), REFLOW_AP_CFG_NO_SSID, NULL);
+	zassert_equal(reflow_wifi_ap_check(NULL, psk8), REFLOW_AP_CFG_NO_SSID, NULL);
+	zassert_equal(reflow_wifi_ap_check(psk64, psk8), REFLOW_AP_CFG_SSID_TOO_LONG,
+		      "SSID de 64 caracteres foi aceito");
+}
+
+/*
+ * O motivo tem de chegar ao operador: a mensagem do boot e a unica coisa que
+ * ele ve quando a UI web nao sobe, e "unknown" nao diz o que configurar.
+ */
+ZTEST(reflow_wifi_ap, test_cada_recusa_tem_motivo_proprio)
+{
+	static const enum reflow_ap_cfg todos[] = {
+		REFLOW_AP_CFG_OK, REFLOW_AP_CFG_NO_SSID,
+		REFLOW_AP_CFG_SSID_TOO_LONG, REFLOW_AP_CFG_OPEN,
+		REFLOW_AP_CFG_PSK_TOO_SHORT, REFLOW_AP_CFG_PSK_TOO_LONG,
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(todos); i++) {
+		const char *msg = reflow_wifi_ap_cfg_str(todos[i]);
+
+		zassert_not_null(msg, NULL);
+		zassert_true(msg[0] != '\0', "motivo %u vazio", (unsigned int)i);
+		zassert_true(strcmp(msg, "unknown") != 0,
+			     "o caso %u cai no default do switch", (unsigned int)i);
+	}
+}
+
+ZTEST_SUITE(reflow_wifi_ap, NULL, NULL, NULL, NULL, NULL);
 
 /* ------------------------------------------------------ command authorisation */
 
