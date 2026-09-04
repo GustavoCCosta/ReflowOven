@@ -192,8 +192,22 @@ enum reflow_cmd_parse reflow_cmd_parse(const char *query, struct reflow_cmd *cmd
 	 * push the decision back into httpd.c - out of the layer that exists to
 	 * hold exactly this kind of decision (RFO-B10).
 	 */
-	if (id == REFLOW_CMD_SELECT_PROFILE && have_arg &&
-	    (arg < 0 || arg >= (int32_t)reflow_profile_count())) {
+	/*
+	 * RFO-B40. The missing arg is part of the same check, and it has to be:
+	 * arg starts at 0, so a request that never mentioned it is
+	 * indistinguishable from one that asked for index 0 by the time this
+	 * line runs. Guarding the range on have_arg alone let
+	 * "id=profile" - and "id=profile&argx=256", which is the same thing
+	 * with a typo - answer 204 and switch the oven to profile 0, the
+	 * 245 degC lead-free reflow. Not asking for a profile is not asking
+	 * for the first one.
+	 *
+	 * The requirement is the profile command's alone. "id=stop" carries no
+	 * arg and must stay valid: a validation patch is exactly where a stop
+	 * gets swallowed by accident (RFO-B10).
+	 */
+	if (id == REFLOW_CMD_SELECT_PROFILE &&
+	    (!have_arg || arg < 0 || arg >= (int32_t)reflow_profile_count())) {
 		malformed = true;
 	}
 
