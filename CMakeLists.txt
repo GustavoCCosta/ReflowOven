@@ -38,4 +38,11 @@ target_sources_ifdef(CONFIG_REFLOW_NET           app PRIVATE src/net/httpd.c src
 target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI     app PRIVATE src/net/wifi.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_USB_ECM  app PRIVATE src/net/usb_net.c)
 
+# The page the HTTP server serves is generated, not committed - see the file
+# for why. Only the builds that contain httpd.c need it.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/index_html.cmake)
+if(CONFIG_REFLOW_NET)
+  reflow_generate_index_html(${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 target_include_directories(app PRIVATE src)
