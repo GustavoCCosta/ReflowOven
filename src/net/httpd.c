@@ -54,7 +54,22 @@ LOG_MODULE_REGISTER(reflow_httpd, CONFIG_REFLOW_LOG_LEVEL);
 #define IDLE_BUDGET_MS CONFIG_REFLOW_NET_IDLE_BUDGET_MS
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
-static struct k_mutex snap_lock;
+/*
+ * RFO-B14. Statically initialised, and it has to be: telemetry_cb() runs
+ * synchronously on the control thread, which publishes from the first sample
+ * after boot, while this thread only starts after the 1000 ms delay of its
+ * K_THREAD_DEFINE. A k_mutex_init() in httpd_thread() therefore ran AFTER the
+ * listener had already locked the mutex a couple of times - on a zeroed
+ * struct whose wait_q dlist is not linked - and then reset lock_count and
+ * owner on an object already in use.
+ *
+ * It survived on a single-CPU build because the uncontended path never
+ * touches wait_q. Under contention, or on the SMP ESP32 targets, it corrupts
+ * owner/wait_q, and the K_FOREVER lock in build_state_json() is where that
+ * ends: the http thread parked for good, with no page, no event stream and no
+ * remote Stop.
+ */
+static K_MUTEX_DEFINE(snap_lock);
 static struct reflow_telemetry snapshot;
 
 static void telemetry_cb(const struct zbus_channel *chan)
@@ -364,7 +379,6 @@ static void httpd_thread(void *a, void *b, void *c)
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
 
-	k_mutex_init(&snap_lock);
 	for (int i = 0; i < MAX_CLIENTS; i++) {
 		clients[i].fd = -1;
 	}
