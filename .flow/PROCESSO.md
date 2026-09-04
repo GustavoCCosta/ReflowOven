@@ -180,6 +180,26 @@ Enquanto não houver sessão de Q.A. independente ativa, o Gerente registra no P
 que a revisão foi feita sem segunda opinião. Item de segurança (`gate`) aprovado
 sem Q.A. independente é reportado ao Gustavo, não silenciado.
 
+### O veredito de Q.A. é uma review nativa, não um comentário
+
+Decidido em 2026-09-04 (RFO-G13, #57): o Q.A. tem **identidade própria no
+GitHub**, a conta `QualityAssurance2007`, colaboradora com `push` e `triage` e
+autenticada com PAT *classic* de escopo `repo` — **sem** `workflow`, porque a
+seção 9 reserva a régua ao humano. Foi a primeira das duas saídas da issue; a
+outra (aceitar o contrato no lugar do mecanismo) fica descartada.
+
+Consequências que valem como regra:
+
+- O veredito do Q.A. sai por `gh pr review --approve` / `--request-changes` e é
+  achável em `gh pr view <N> --json reviews`. **Veredito em comentário comum não
+  conta** e não satisfaz a proteção da `main`.
+- A identidade vai por `GH_TOKEN` **por chamada**:
+  `GH_TOKEN=$(gh auth token --user QualityAssurance2007) gh pr review ...`.
+  **Ninguém roda `gh auth switch`** — a conta ativa do `gh` é estado global da
+  máquina e trocá-la derruba a sessão que estiver ao lado (RFO-G18, #74).
+- "Ninguém aprova o próprio PR" (seção 8) volta a ser mecanismo: o GitHub recusa
+  review na própria PR, e quem aprova não é a conta que abriu.
+
 ## 8. Limites duros
 
 - Ninguém altera este arquivo nem `.github/workflows/` — ver seção 9.
@@ -218,6 +238,16 @@ O gate só é gate se o GitHub o impuser. Configuração esperada em `main`
 - Required status checks: `Logica pura + host_sim`, `ztest (native_sim)`,
   `Matriz de modularidade (native_sim)`, `Contrato de PR`.
 - Bloquear push direto e force-push na `main`.
+
+Estado real em 2026-09-04, para ninguém supor garantia que não existe:
+
+- **Ligado:** PR obrigatório, `required_approving_review_count: 1` (era `0` — a
+  aprovação era impossível antes do RFO-G13, #57), `dismiss_stale_reviews: true`
+  (push novo derruba a aprovação e o Q.A. reaprova), sem force-push, sem
+  deleção, histórico linear, resolução de conversa obrigatória.
+- **Não ligado:** os quatro *required status checks* acima. Merge com CI
+  vermelho ainda é contrato, não mecanismo — e continua proibido pela seção 8.
+- `enforce_admins: false`: o Gustavo passa por cima quando precisa. Agente não.
 
 Enquanto a proteção não estiver ligada, as garantias são de contrato e não de
 mecanismo — exatamente a fraqueza que a v2 existe para remover.
