@@ -3,4 +3,7 @@ tests:
     platform_allow:
       - native_sim
       - qemu_x86
-    tags: reflow heater seguranca
+    tags:
+      - reflow
+      - heater
+      - seguranca
