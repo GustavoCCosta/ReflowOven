@@ -917,13 +917,61 @@ ZTEST(reflow_httpgate, test_token_must_be_present_and_exact)
 		      REFLOW_GATE_UNAUTHORIZED, "empty token value");
 }
 
-ZTEST(reflow_httpgate, test_build_without_token_refuses_everything)
+/*
+ * RFO-G31: this was called test_build_without_token_refuses_everything, and
+ * "everything" was not true - it covers /api/cmd and nothing else. Whoever read
+ * the name concluded that reads are refused too, which is the opposite of what
+ * the oven does and of what the Kconfig promises. The name is the documentation
+ * most people read. The other half of that promise is the test below.
+ */
+ZTEST(reflow_httpgate, test_build_without_token_refuses_commands)
 {
 	/* Fail closed: never "accepts because no token was configured". */
 	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start", TOKEN_HDR), ""),
 		      REFLOW_GATE_DISABLED, "no token in the build must disable commands");
 	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=stop", ""), ""),
 		      REFLOW_GATE_DISABLED, "and it must disable them for everyone");
+}
+
+/*
+ * RFO-G31. The half of the Kconfig promise - "commands answer 503, telemetry is
+ * still served" - that nobody asserted: test_read_only_routes_stay_open below
+ * passes a NON-empty token, so it says nothing about a build without one. The
+ * reviewer had to measure it by hand to be convinced.
+ *
+ * It stopped being a detail with RFO-F07. The API used to live on a USB cable or
+ * on a network somebody administered; now the oven brings up its own access
+ * point, and "telemetry is still served with an empty token" defines what any
+ * device within radio range reads out of a build with no token. That is a safety
+ * decision, and the decision is this one: the oven shows what it is doing and
+ * takes no orders.
+ *
+ * Both halves live in one test on purpose. Apart, one can stay green while the
+ * other is deleted - and the promise is not "reads open" nor "commands refused",
+ * it is the two at once, in the same build.
+ */
+ZTEST(reflow_httpgate, test_build_without_token_keeps_reads_open)
+{
+	static const char *const reads[] = {
+		"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+		"GET /api/state HTTP/1.1\r\n\r\n",
+		"GET /api/events HTTP/1.1\r\n\r\n",
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(reads); i++) {
+		zassert_equal(reflow_gate_check(reads[i], ""), REFLOW_GATE_ALLOW,
+			      "read %u refused on a build with no token: the oven "
+			      "stopped showing what it is doing (%s)",
+			      (unsigned int)i, reads[i]);
+	}
+
+	/* And in the SAME build, the command is still refused. */
+	zassert_equal(reflow_gate_check(REQ("/api/cmd?id=start", TOKEN_HDR), ""),
+		      REFLOW_GATE_DISABLED,
+		      "a command got through with no token: the whole gate is gone");
+	zassert_equal(reflow_gate_status(REFLOW_GATE_DISABLED)[0], '5',
+		      "the refusal stopped being a 5xx: %s",
+		      reflow_gate_status(REFLOW_GATE_DISABLED));
 }
 
 ZTEST(reflow_httpgate, test_read_only_routes_stay_open)
