@@ -367,6 +367,23 @@ source "subsys/logging/Kconfig.template.log_config"
 
 endmenu
 
+# Sockets poll() sizing lives in ZVFS since NET_SOCKETS started selecting it
+# (the old NET_SOCKETS_POLL_MAX no longer exists). The web UI polls one
+# listening socket plus REFLOW_NET_MAX_CLIENTS connections, so 8 + 1 covers the
+# whole allowed range of clients.
+#
+# THIS BLOCK IS BEFORE `source "Kconfig.zephyr"` ON PURPOSE (RFO-B15).
+# `configdefault` inserts its default at the position the symbol's default list
+# had when the block was parsed, and Kconfig then takes the first default whose
+# condition holds. ZVFS_POLL_MAX carries an unconditional `default 3` upstream,
+# so a configdefault parsed AFTER the Zephyr tree lands behind that 3 and never
+# applies - which is exactly what happened: the shipped firmware built with
+# CONFIG_ZVFS_POLL_MAX=3 while this file claimed 8, and the server died as soon
+# as three connections were open. Parsed before the tree, this default is first
+# and wins. Anything set in prj.conf or on the command line still beats it.
+configdefault ZVFS_POLL_MAX
+	default 9 if REFLOW_NET
+
 source "Kconfig.zephyr"
 
 # Subsystem tuning that belongs to a feature, kept here instead of in
@@ -398,12 +415,6 @@ configdefault INPUT_GPIO_KEYS
 # DHCP client for the Wi-Fi link only: on the USB link the oven is the server.
 configdefault NET_DHCPV4
 	default y if REFLOW_LINK_WIFI
-
-# Sockets poll() sizing lives in ZVFS since NET_SOCKETS started selecting it
-# (the old NET_SOCKETS_POLL_MAX no longer exists). The web UI polls one
-# listening socket plus REFLOW_NET_MAX_CLIENTS connections.
-configdefault ZVFS_POLL_MAX
-	default 8 if REFLOW_NET
 
 configdefault NET_MAX_CONTEXTS
 	default 10 if REFLOW_NET

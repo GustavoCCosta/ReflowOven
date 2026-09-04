@@ -11,3 +11,23 @@ tests:
     # The image waits on the compressed fake timeout twice and then on the
     # server's own poll cadence, so the suite is dominated by sleeping.
     timeout: 120
+
+  # Same image, same assertions, at the top of the allowed client range
+  # (RFO-B15). The server polls one listening socket plus MAX_CLIENTS
+  # connections, so this is the configuration that needs the most poll entries -
+  # and with CONFIG_ZVFS_POLL_MAX left at 8, zsock_poll() answered -EINVAL on
+  # every call and the server never accepted anything. Nothing in the build said
+  # so: it is a runtime failure of a legal configuration, which is why it needs
+  # a scenario and not a comment.
+  reflow.httpwait.max_clients:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - net
+      - httpd
+      - funcional
+    extra_configs:
+      - CONFIG_REFLOW_NET_MAX_CLIENTS=8
+    timeout: 120
