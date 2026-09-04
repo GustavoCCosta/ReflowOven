@@ -210,6 +210,51 @@ CONFIG_REFLOW_WIFI_SSID="my-network"
 CONFIG_REFLOW_WIFI_PSK="my-passphrase"
 ```
 
+### Web UI over the oven's own Wi-Fi (access point)
+
+The third link, and the one that needs no other network: the oven **is** the
+network. It broadcasts its own SSID, serves the page at a fixed address, and a
+phone or laptop joins it directly. Needs a radio, so ESP32 targets only.
+
+```sh
+west blobs fetch hal_espressif        # once, per Espressif SoC
+west build -p always -b esp32s3_devkitc/esp32s3/procpu reflow_oven -- \
+  -DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_WIFI_AP=y \
+  -DCONFIG_REFLOW_AP_PSK='"your-passphrase"' \
+  -DCONFIG_REFLOW_NET_TOKEN='"your-token"'
+west flash && west espressif monitor
+```
+
+Then join `reflow-oven` on the phone and open `http://192.168.4.1/`.
+
+| Option | Default | What it is |
+| --- | --- | --- |
+| `CONFIG_REFLOW_AP_SSID` | `reflow-oven` | 1 to 32 characters; not a secret |
+| `CONFIG_REFLOW_AP_PSK` | **empty** | WPA2 passphrase, 8 to 63 characters |
+| `CONFIG_REFLOW_AP_IPV4_ADDR` | `192.168.4.1` | the address to open in the browser |
+| `CONFIG_REFLOW_AP_IPV4_MASK` | `255.255.255.0` | |
+| `CONFIG_REFLOW_AP_DHCP_POOL_START` | `192.168.4.2` | first address handed to a client |
+
+**The passphrase is empty by default and the access point will not come up
+without it.** That is deliberate, not an oversight: a secret does not belong in
+a versioned file, and this link puts start and stop of a mains heater within
+radio range of anyone. A freshly flashed board is exactly the one with nothing
+configured, so the shipped default is "no network on the air". The build prints
+a CMake warning, the oven logs at error level every boot, and the web UI stays
+off until `CONFIG_REFLOW_AP_PSK` is set. Pass it on the build command line, or
+from a conf fragment you do not commit.
+
+**Two gates, and they are independent.** The passphrase decides who can join the
+network; `CONFIG_REFLOW_NET_TOKEN` decides who can command the oven. With a
+passphrase set and the token empty, the page and the telemetry are served to
+whoever joined and `POST /api/cmd` answers **503** to everyone — the oven tells
+but does not obey. Set both to have a usable remote Stop.
+
+**Never run on hardware.** This link compiles clean and its configuration
+decision is unit tested, but no radio has ever been brought up by it: nothing
+here has been flashed, no phone has joined it, and the page has not been opened
+over the air.
+
 ### ESP32-S3-WROOM-1 — `esp32s3_devkitc/esp32s3/procpu` (core + shell)
 
 The target for the Sunton **ESP32-8048S043**: 4.3" RGB panel board, USB-C.

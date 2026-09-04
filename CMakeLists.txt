@@ -37,5 +37,26 @@ target_sources_ifdef(CONFIG_REFLOW_NET           app PRIVATE src/net/httpd.c src
                                                             src/net/sendbudget.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI     app PRIVATE src/net/wifi.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_USB_ECM  app PRIVATE src/net/usb_net.c)
+target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI_AP  app PRIVATE src/net/wifi_ap.c
+                                                             src/net/wifi_ap_cfg.c)
+
+#
+# The access point link refuses to broadcast without a passphrase (see
+# reflow_wifi_ap_usable()), and that refusal happens at boot - inside a closed
+# oven, in a log nobody may be reading. Say it here as well, where whoever is
+# building can still act on it.
+#
+# It is a warning and not a FATAL_ERROR on purpose: the empty default has to
+# stay buildable, or the modularity matrix could not compile this link at all
+# without a secret in a versioned file - which is the thing PROCESSO section 8
+# forbids.
+#
+if(CONFIG_REFLOW_LINK_WIFI_AP AND "${CONFIG_REFLOW_AP_PSK}" STREQUAL "")
+  message(WARNING
+    "CONFIG_REFLOW_AP_PSK is empty: the oven will NOT start its access point "
+    "and the web UI will stay off. Set it at build time "
+    "(-DCONFIG_REFLOW_AP_PSK=\"...\") or from an uncommitted conf fragment. "
+    "Never commit it (PROCESSO section 8).")
+endif()
 
 target_include_directories(app PRIVATE src)
