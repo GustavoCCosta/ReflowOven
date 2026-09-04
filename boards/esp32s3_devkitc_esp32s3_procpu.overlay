@@ -1,0 +1,110 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Reflow oven hardware map for the ESP32-S3-WROOM-1 on a Sunton
+ * ESP32-8048S043 (4.3" RGB panel board), built as
+ * esp32s3_devkitc/esp32s3/procpu.
+ *
+ *   SPI2: SCLK GPIO12, MISO GPIO13, MOSI GPIO11 (the board's default pinctrl)
+ *     CS GPIO18 -> MAX6675 thermocouple front-end
+ *   GPIO17      -> SSR gate (active high, 3V3 logic input of the SSR module)
+ *
+ * Scope of this target is the control core plus the shell: no panel, no
+ * encoder, no networking. The 4.3" panel is an RGB parallel display and is not
+ * this file's business (RFO-F05/RFO-G23).
+ *
+ * WHY THESE FIVE PINS, on this board and not on a DevKitC
+ * ------------------------------------------------------
+ * This PCB spends almost every GPIO before the application gets a say. What is
+ * left is one JST 1.28mm 4P pair on the back, and these are exactly its pins.
+ *
+ * Not available, and why:
+ *
+ *   GPIO1,3,4,5,6,7,8,9,14,15,16,21,39,40,41,42,45,46,47,48
+ *                 the 16-bit RGB bus, DE, VSYNC, HSYNC and PCLK of the panel
+ *   GPIO2         panel backlight
+ *   GPIO19,20     GT911 touch I2C, and the USB Serial/JTAG pair
+ *   GPIO43,44     UART0, the console this target logs to
+ *   GPIO26..37    SPI flash and the octal PSRAM of the WROOM-1 module
+ *   GPIO0,3,45,46 strapping pins (boot mode, JTAG source, VDD_SPI voltage)
+ *
+ * What is left, and what it costs:
+ *
+ *   GPIO11,12,13  the microSD slot's SD_MMC lines, broken out as SPI on the
+ *                 connector. Free while no card is used, and they are already
+ *                 the board's default spim2 pins, so the thermocouple needs no
+ *                 pin routing of its own.
+ *   GPIO17,18     the only two pins with no second duty by default.
+ *
+ * The SSR gate takes GPIO17 and the chip select takes GPIO18, not the other way
+ * round. GPIO18 can be tied to the GT911 interrupt by a solder jumper on some
+ * revisions of this board; if someone closes that jumper, a touch would pull
+ * the line the SSR gate sits on. On the chip select the same event costs a
+ * corrupt reading, which the firmware already turns into FAULT_SENSOR and an
+ * open element. Put the failure where it fails safe.
+ *
+ * The hardware chip select is deliberately NOT in the pinctrl group below.
+ * The board's own spim2_default maps SPIM2_CSEL to GPIO10, and driving a
+ * hardware CS on a pin the application also thinks is free is the RFO-B18
+ * defect (#16) on the classic ESP32. Chip select here is a plain GPIO in
+ * cs-gpios, and GPIO10 is left alone.
+ *
+ * The SSR gate floats at reset like every other S3 pin: the module needs its
+ * own pull-down to ground, on the board, or the element can be energised
+ * between power-on and the first instruction of heater.c (RFO-B06).
+ *
+ * Check every pin against your own wiring before applying mains power. Nothing
+ * here has been verified on hardware.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
+
+/ {
+	reflow_outputs {
+		compatible = "gpio-leds";
+
+		ssr0: ssr_0 {
+			gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+			label = "SSR heater";
+		};
+	};
+
+	aliases {
+		reflow-ssr = &ssr0;
+		reflow-thermocouple = &max6675;
+	};
+};
+
+&pinctrl {
+	/*
+	 * The board's spim2_default minus SPIM2_CSEL_GPIO10 - see the note above.
+	 * The MAX6675 never receives a byte, but MOSI stays in the group and
+	 * driven low: leaving it out would not free the pin for anything on this
+	 * board, and an undriven MOSI is a floating input on the connector.
+	 */
+	spim2_reflow: spim2_reflow {
+		group1 {
+			pinmux = <SPIM2_MISO_GPIO13>,
+				 <SPIM2_SCLK_GPIO12>;
+		};
+
+		group2 {
+			pinmux = <SPIM2_MOSI_GPIO11>;
+			output-low;
+		};
+	};
+};
+
+&spi2 {
+	status = "okay";
+	pinctrl-0 = <&spim2_reflow>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0 18 GPIO_ACTIVE_LOW>;
+
+	max6675: max6675@0 {
+		compatible = "maxim,max6675";
+		reg = <0>;
+		spi-max-frequency = <2000000>;
+		status = "okay";
+	};
+};
