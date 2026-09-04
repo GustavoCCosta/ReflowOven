@@ -19,6 +19,42 @@ const html = fs.readFileSync(
 	path.join(__dirname, '..', 'src', 'net', 'index.html'), 'utf8');
 const js = html.match(/<script>([\s\S]*)<\/script>/)[1];
 
+/*
+ * The starting style of a stubbed element has to mirror the page's own inline
+ * attribute, and it is READ OUT OF THE PAGE rather than copied here (RFO-B23).
+ *
+ * The defect this replaces: the stub started as `style: {}` and the HTTP path
+ * never touches style.display, so `=== undefined` was always true and the
+ * assertion below could not fail. It would have stayed green with the USB
+ * button on display while the oven served the page -- the exact regression it
+ * exists to catch.
+ *
+ * Copying the value ('none') into the stub would fix the assertion and leave a
+ * second hole: a page that drops style='display:none' from the button would
+ * still pass, because the stub would supply the hiding the page no longer does.
+ * Reading the attribute means that page has to come here as a failure.
+ */
+function inlineStyle(id) {
+	const tag = html.match(new RegExp("<[^>]*id='" + id + "'[^>]*>"));
+	const attr = tag && tag[0].match(/style='([^']*)'/);
+	const style = {};
+
+	if (!attr) {
+		return style;
+	}
+	for (const decl of attr[1].split(';')) {
+		const [prop, value] = decl.split(':');
+
+		if (prop && value) {
+			/* display-mode -> displayMode, like the real style object. */
+			const key = prop.trim().replace(/-(\w)/g, (_, c) => c.toUpperCase());
+
+			style[key] = value.trim();
+		}
+	}
+	return style;
+}
+
 let failures = 0;
 function check(name, cond, detail) {
 	if (cond) {
@@ -33,7 +69,7 @@ function makeDom() {
 	const els = {};
 	const mk = (id) => (els[id] = {
 		id, textContent: '', innerHTML: '', className: '', value: '',
-		style: {}, options: [], innerHTMLSet: 0,
+		style: inlineStyle(id), options: [], innerHTMLSet: 0,
 		appendChild(o) { this.options.push(o); },
 		set innerHTMLraw(v) {},
 		getContext: () => new Proxy({}, { get: () => () => {} }),
@@ -74,7 +110,7 @@ const sample = {
 console.log('transport selection');
 const oven = run({ protocol: 'http:', hostname: '192.168.7.1' }, { serial: true });
 check('served by the oven -> USB button hidden',
-      oven.els.usb.style.display === 'none' || oven.els.usb.style.display === undefined,
+      oven.els.usb.style.display === 'none',
       `display=${JSON.stringify(oven.els.usb.style.display)}`);
 
 const local = run({ protocol: 'file:', hostname: '' }, { serial: true });
