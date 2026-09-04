@@ -210,6 +210,47 @@ CONFIG_REFLOW_WIFI_SSID="my-network"
 CONFIG_REFLOW_WIFI_PSK="my-passphrase"
 ```
 
+### ESP32-S3-WROOM-1 — `esp32s3_devkitc/esp32s3/procpu` (core + shell)
+
+The target for the Sunton **ESP32-8048S043**: 4.3" RGB panel board, USB-C.
+Scope here is the control core plus the shell on UART0 — no panel, no encoder,
+no networking. The panel is an RGB parallel display, not the SPI panel
+`display_ui.c` drives.
+
+| Signal | Pin | Notes |
+| --- | --- | --- |
+| SPI2 SCLK / MISO / MOSI | GPIO12 / 13 / 11 | board defaults; the microSD lines, free with no card |
+| MAX6675 CS | GPIO18 | plain GPIO chip select, 2 MHz |
+| SSR gate | GPIO17 | active high, 3V3 logic input |
+
+**Why these pins.** On this board almost every GPIO is spent before the
+application gets a say: GPIO1, 3-9, 14-16, 21, 39-42 and 45-48 are the 16-bit
+RGB bus with DE, VSYNC, HSYNC and PCLK; GPIO2 is the backlight; GPIO19/20 are
+the GT911 touch I2C and the USB Serial/JTAG pair; GPIO43/44 are the console;
+GPIO26-37 are the module's flash and octal PSRAM. GPIO0, 3, 45 and 46 are
+strapping pins. What remains is one JST 1.28mm 4P pair on the back, and the
+table above is exactly it.
+
+The SSR gate takes GPIO17 and the chip select GPIO18, not the reverse: GPIO18
+can be tied to the GT911 interrupt by a solder jumper on some revisions, and a
+stray edge there costs a corrupt reading — `FAULT_SENSOR`, element open —
+instead of a stray pulse on the heater. The overlay also drops
+`SPIM2_CSEL_GPIO10` from the pin group: a hardware chip select on a pin the
+application believes is free is the RFO-B18 defect on the classic ESP32.
+
+Like every other target, the SSR gate floats between reset and
+`reflow_heater_init()`; the module needs its own pull-down to ground on the
+board.
+
+```sh
+west blobs fetch hal_espressif        # once, per Espressif SoC
+west build -p always -b esp32s3_devkitc/esp32s3/procpu reflow_oven
+west flash && west espressif monitor
+```
+
+**Never run on hardware.** This target compiles clean; nothing on it has been
+flashed, and no pin has been verified against a real ESP32-8048S043.
+
 ## Removing or replacing a module
 
 Each optional module is a leaf: one source file, one Kconfig symbol, one line in
