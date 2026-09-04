@@ -10,4 +10,7 @@ tests:
       - seguranca
     # Every assertion waits on the 250 ms sampling cadence of the real control
     # thread, so the suite is dominated by sleeping, not by computing.
-    timeout: 120
+    # test_absolute_cut_out_trips_with_the_run_finished roda um perfil
+    # inteiro (425 s de relogio do forno) porque so assim se chega a DONE
+    # (RFO-T47). O relogio e simulado, mas a corrida ainda domina a suite.
+    timeout: 400

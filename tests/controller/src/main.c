@@ -115,6 +115,24 @@ static void fresh_idle(void *unused)
 	post(REFLOW_CMD_STOP, 0);
 	post(REFLOW_CMD_CLEAR_FAULT, 0);
 
+	/*
+	 * DONE nao sai por STOP: handle_cmd() so para um forno RUNNING, e nada
+	 * mais deixa DONE exceto comecar outra corrida. Ate o RFO-T47 nenhum
+	 * teste terminava uma corrida, entao nenhum setup precisou lidar com
+	 * isso; agora um termina, e um teste que falhe no meio dessa corrida
+	 * deixa o forno ali. Sem esta volta, a proxima asserção seria um
+	 * timeout em CADA teste seguinte, e o vermelho apontaria para todo lado
+	 * menos para o defeito.
+	 */
+	zassert_ok(zbus_chan_read(&reflow_telemetry_chan, &t, K_MSEC(200)), NULL);
+	if (t.state == REFLOW_STATE_DONE) {
+		post(REFLOW_CMD_START, 0);
+		zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t),
+			     "nao consegui sair de DONE: START recusado (%s/%s)",
+			     reflow_state_str(t.state), reflow_fault_str(t.fault));
+		post(REFLOW_CMD_STOP, 0);
+	}
+
 	zassert_true(wait_for(is_state, REFLOW_STATE_IDLE, &t),
 		     "oven did not return to idle (state %s, fault %s)",
 		     reflow_state_str(t.state), reflow_fault_str(t.fault));
@@ -371,6 +389,94 @@ ZTEST(reflow_controller, test_absolute_cut_out_trips_with_the_oven_idle)
 		      "START was accepted with the over-temperature fault latched "
 		      "(state %s)", reflow_state_str(t.state));
 	zassert_false(reflow_heater_is_on(), "element energised from a latched fault");
+}
+
+/*
+ * RFO-T47: o corte absoluto tambem vale para o forno que ACABOU de rodar.
+ *
+ * O RFO-T12 prendeu o caso IDLE e o
+ * test_a_stuck_reading_does_not_blind_the_absolute_cut_out prende o caso
+ * RUNNING. Entre os dois havia um buraco que o Q.A. mediu: uma guarda que
+ * perdesse SO o estado DONE deixava a suite inteira verde.
+ *
+ * DONE e o estado de uma corrida que terminou sozinha, e o comentario do teste
+ * do RFO-T12 ja o listava como motivacao sem cobri-lo: "the run has just
+ * ended". O STOP no pico leva a IDLE e estava coberto; a corrida que termina
+ * leva a DONE e nao estava. E o pior momento para nao ter backstop -- ninguem
+ * esta pedindo calor, entao um contato de SSR colado nao tem mais nada em
+ * software se opondo a ele.
+ *
+ * Chegar em DONE custa uma corrida inteira, e nao ha atalho: stage_complete()
+ * exige o tempo nominal do estagio E o alvo termico, entao o teste roda o
+ * perfil mais curto da tabela (Sn63Pb37, 425 s nominais) alimentando o sensor
+ * falso com o proprio setpoint da corrida. O relogio e simulado e as duas
+ * threads dormem quase o tempo todo, mas isto ainda e o teste mais caro da
+ * suite -- dai o timeout do testcase.yaml.
+ */
+#define RUN_BUDGET_MS 600000
+
+/*
+ * Segue o setpoint que a propria corrida publica, ate ela sair de RUNNING.
+ * Alimentar o setpoint em vez de uma rampa escrita a mao e o que mantem o teste
+ * valido se os perfis mudarem: o que se exige do forno e que ele siga o que
+ * pediu, nao uma tabela copiada para dentro do teste.
+ */
+static bool run_until_not_running(struct reflow_telemetry *last)
+{
+	int64_t deadline = k_uptime_get() + RUN_BUDGET_MS;
+
+	while (true) {
+		zassert_ok(zbus_chan_read(&reflow_telemetry_chan, last, K_MSEC(200)),
+			   "telemetry channel unreadable");
+		if (last->state != REFLOW_STATE_RUNNING) {
+			return true;
+		}
+		reflow_temp_fake_set_raw_mc(last->setpoint_mc);
+		if (k_uptime_get() >= deadline) {
+			return false;
+		}
+		k_msleep(20);
+	}
+}
+
+ZTEST(reflow_controller, test_absolute_cut_out_trips_with_the_run_finished)
+{
+	struct reflow_telemetry t;
+
+	/* Perfil 1 (Sn63Pb37) e o mais curto da tabela: 425 s nominais. */
+	post(REFLOW_CMD_SELECT_PROFILE, 1);
+	post(REFLOW_CMD_START, 0);
+	zassert_true(wait_for(is_state, REFLOW_STATE_RUNNING, &t), "the run did not start");
+
+	zassert_true(run_until_not_running(&t),
+		     "a corrida nao terminou em %d ms de relogio do forno (estagio "
+		     "%u/%u, %u ms)", RUN_BUDGET_MS, t.stage_idx, t.n_stages, t.stage_ms);
+	zassert_equal(t.state, REFLOW_STATE_DONE,
+		      "a corrida terminou em %s/%s em vez de DONE",
+		      reflow_state_str(t.state), reflow_fault_str(t.fault));
+	zassert_false(reflow_heater_is_on(), "element still energised in DONE");
+
+	/* O forno acabou de fazer o pico e agora passa do limite duro. */
+	reflow_temp_fake_set_raw_mc(ABS_MAX_MC + 1000);
+
+	zassert_true(wait_for(is_fault, REFLOW_FAULT_OVERTEMP, &t),
+		     "o forno leu %d mC em DONE e ficou em %s/%s: o backstop nao "
+		     "alcanca a corrida que acabou", ABS_MAX_MC + 1000,
+		     reflow_state_str(t.state), reflow_fault_str(t.fault));
+	zassert_false(reflow_heater_is_on(),
+		      "element energised after over-temperature in DONE");
+
+	/*
+	 * Devolve o sensor a uma leitura fria ANTES de sair. O fresh_idle do
+	 * proximo teste limpa a falta, e limpar com 271 degC ainda na entrada
+	 * do backstop a faz voltar na amostra seguinte -- o proximo teste
+	 * comecaria contra um forno que ele acha ocioso e esta em FAULT. Isto
+	 * nao e detalhe de arrumacao: sem ele, uma mutacao que apenas quebre
+	 * ESTE teste derruba metade da suite por tabela, e o vermelho deixa de
+	 * dizer onde esta o defeito.
+	 */
+	reflow_temp_fake_set_raw_mc(25000);
+	wait_samples(4);
 }
 
 /* A cleared fault has to give the oven back, not brick it until reboot. */
