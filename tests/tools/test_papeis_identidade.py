@@ -29,6 +29,21 @@ def linhas(caminho):
     return caminho.read_text(encoding="utf-8").splitlines()
 
 
+def comando_logico(linhas, i):
+    """O comando de shell inteiro a que a linha `i` pertence.
+
+    Sobe so por continuacao explicita - linha anterior terminada em `\\`, a
+    forma que o proprio QA.md usa. Uma linha vizinha qualquer nao entra: ela
+    e outro comando, e o prefixo que ela carrega nao autentica este. Foi
+    essa janela de duas linhas frouxa que deixou um `gh pr review` cru
+    escapar (RFO-G29).
+    """
+    inicio = i
+    while inicio > 0 and linhas[inicio - 1].rstrip().endswith("\\"):
+        inicio -= 1
+    return "\n".join(linhas[inicio:i + 1])
+
+
 class TestIdentidadeDoQA(unittest.TestCase):
     def setUp(self):
         self.assertTrue(QA_MD.is_file(), "%s ausente" % QA_MD)
@@ -49,9 +64,7 @@ class TestIdentidadeDoQA(unittest.TestCase):
         for i, linha in enumerate(self.linhas):
             if "gh pr review" not in linha:
                 continue
-            anterior = self.linhas[i - 1] if i > 0 else ""
-            contexto = anterior + "\n" + linha
-            if PREFIXO not in contexto:
+            if PREFIXO not in comando_logico(self.linhas, i):
                 sem_identidade.append((i + 1, linha.strip()))
         self.assertEqual([], sem_identidade,
                          "gh pr review sem %s: %r" % (PREFIXO, sem_identidade))
