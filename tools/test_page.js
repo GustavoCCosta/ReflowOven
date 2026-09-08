@@ -122,7 +122,18 @@ function run(locationObj, opts = {}) {
 
 			return Promise.resolve({ ok: status < 400, status });
 		},
-		EventSource: function () { this.onmessage = null; this.onerror = null; },
+		/*
+		 * The stub hands the instance back (RFO-B42). Without it the harness
+		 * could only watch what the page does with data that ARRIVES, and the
+		 * transport messages are written from the error path - the one the
+		 * EventSource fires by itself on every reconnection attempt, with no
+		 * operator action behind it.
+		 */
+		EventSource: function () {
+			this.onmessage = null;
+			this.onerror = null;
+			sandbox.lastEs = this;
+		},
 		setInterval: () => 0, clearInterval: () => {},
 		TextEncoder, TextDecoder,
 	};
@@ -289,6 +300,75 @@ check('profile listing recognised', profiles === 1, `profiles=${profiles}`);
 	retry.sandbox.update(sample);
 	check('an accepted command clears the old refusal',
 	      !/desligado/.test(shown(retry)), shown(retry));
+
+	/*
+	 * RFO-B42: a message about the TRANSPORT has the opposite lifetime, and
+	 * telemetry arriving is the proof that settles it.
+	 *
+	 * es.onerror fires on its own, on every reconnection attempt, with no
+	 * operator action behind it. RFO-B41 gave command messages an element
+	 * update() never touches - which is right for a refusal and wrong here:
+	 * the warning outlived the outage and the page kept saying the link was
+	 * gone while telemetry ran normally behind it. That is RFO-B19 mirrored:
+	 * the operator who needs to stop the oven reads 'no link', does not try
+	 * the button, and goes looking for another way - and that time is time
+	 * with the element on.
+	 */
+	console.log('a transport warning goes away when the link comes back');
+
+	const t = run({ protocol: 'http:', hostname: '192.168.7.1' }, { serial: true });
+
+	check('the page exposes an EventSource to fail',
+	      t.sandbox.lastEs && typeof t.sandbox.lastEs.onerror === 'function',
+	      `lastEs=${t.sandbox.lastEs && typeof t.sandbox.lastEs.onerror}`);
+
+	t.sandbox.lastEs.onerror();
+	check('a lost link is announced', /link lost/.test(shown(t)), shown(t));
+
+	/* Three frames, the same budget the command assertions use: the link is
+	 * demonstrably back, so nothing may still be claiming it is not. */
+	t.sandbox.update(sample);
+	t.sandbox.update(sample);
+	t.sandbox.update(sample);
+	check('the warning is gone once telemetry runs again',
+	      !/link lost/.test(shown(t)), shown(t));
+	check('and the state line is live', t.els.sub.textContent === 'running',
+	      t.els.sub.textContent);
+
+	/*
+	 * The two classes have to coexist. This is the sequence that a fix by
+	 * sharing one element cannot pass: a refusal on screen, then an outage,
+	 * then the link back. The refusal is still unanswered - only the operator
+	 * answers it - and the outage is over.
+	 */
+	const both = run({ protocol: 'http:', hostname: '192.168.7.1' },
+			 { serial: true, cmdStatus: 503 });
+
+	both.sandbox.cmd('stop');
+	await settle();
+	both.sandbox.lastEs.onerror();
+	check('a refusal and a lost link are both on screen',
+	      /desligado/.test(shown(both)) && /link lost/.test(shown(both)),
+	      shown(both));
+
+	both.sandbox.update(sample);
+	both.sandbox.update(sample);
+	both.sandbox.update(sample);
+	check('telemetry clears the transport warning',
+	      !/link lost/.test(shown(both)), shown(both));
+	check('telemetry does NOT clear the command refusal (RFO-B41 holds)',
+	      /desligado/.test(shown(both)), shown(both));
+
+	/* And a transport warning must not be mistaken for an answer to a
+	 * command: the outage does not wipe what the oven refused. */
+	const keep = run({ protocol: 'http:', hostname: '192.168.7.1' },
+			 { serial: true, cmdStatus: 401 });
+
+	keep.sandbox.cmd('stop');
+	await settle();
+	keep.sandbox.lastEs.onerror();
+	check('a lost link does not wipe the refusal either',
+	      /token/i.test(shown(keep)), shown(keep));
 })().then(() => {
 	console.log(failures ? `\nFAILED (${failures})` : '\nall page checks passed');
 	process.exit(failures ? 1 : 0);
