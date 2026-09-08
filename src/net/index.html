@@ -16,6 +16,7 @@ button.stop{background:#c53;color:#fff}
 button.warn{background:#666;color:#fff}
 canvas{width:100%;height:220px;background:#000;border-radius:6px;margin-top:12px}
 .bad{color:#f66;font-weight:600}
+#link{color:#fa6;font-weight:600}
 table{border-collapse:collapse;margin-top:12px;width:100%;max-width:420px}
 td{padding:3px 8px 3px 0;color:#bbb}
 td.v{color:#eee;text-align:right}
@@ -34,6 +35,7 @@ td.v{color:#eee;text-align:right}
 <button id='usb' class='warn' style='display:none' onclick='usbConnect()'>Conectar por USB</button>
 </div>
 <div id='msg'></div>
+<div id='link'></div>
 <div id='hint'>O token fica so nesta aba, em memoria: nao e salvo nem enviado na pagina.</div>
 <canvas id='c' width='640' height='220'></canvas>
 <table>
@@ -76,6 +78,10 @@ function draw(){
 }
 function update(d){
  document.getElementById('temp').innerHTML=(d.temp_valid?(d.temp_mc/1000).toFixed(1):'--')+' &deg;C';
+ /* Este quadro prova que o canal esta de pe, logo o aviso de transporte
+    deixou de ser verdade. Nao toca no #msg: a recusa de comando continua
+    esperando o operador (RFO-B41). */
+ var lk=document.getElementById('link');if(lk.textContent)lk.textContent='';
  var s=d.state+(d.fault!='none'?' - FAULT: '+d.fault:'');
  var sub=document.getElementById('sub');sub.textContent=s;
  sub.className=d.fault!='none'?'bad':'';
@@ -104,12 +110,27 @@ function addProfiles(list){var sel=document.getElementById('prof');sel.innerHTML
    aceito depois limpa a mensagem - a acao dele e o reconhecimento. */
 function say(t){var m=document.getElementById('msg');m.textContent=t;m.className=t?'bad':'';}
 
+/* RFO-B42: mensagem de TRANSPORTE, com o ciclo de vida oposto ao do say().
+   Descreve o canal, nao o que o forno respondeu, e telemetria chegando e a
+   prova de que o canal voltou - logo o update() a limpa.
+
+   O es.onerror dispara sozinho a cada reconexao, sem acao de operador atras.
+   No #msg do RFO-B41 o aviso sobrevivia a queda: a pagina dizia 'sem link'
+   com a telemetria correndo. Quem precisa parar o forno le isso, nao tenta o
+   botao e vai procurar outra forma - e esse tempo e tempo com a resistencia
+   ligada.
+
+   Elemento proprio e nao classe de origem no say(): as duas informacoes sao
+   verdadeiras ao mesmo tempo e levam a acoes diferentes, entao um elemento so
+   obrigaria a escolher qual perder. */
+function link(t){document.getElementById('link').textContent=t;}
+
 /* Transporte 1: servido pelo forno (HTTP + server-sent events). */
 function startHttp(){
  fetch('/api/profiles').then(function(r){return r.json();}).then(function(j){addProfiles(j.profiles);});
  var es=new EventSource('/api/events');
  es.onmessage=function(e){update(JSON.parse(e.data));};
- es.onerror=function(){say('link lost, retrying...');};
+ es.onerror=function(){link('link lost, retrying...');};
 }
 
 /* Transporte 2: pagina local falando com a porta serial USB (Web Serial API).
@@ -119,15 +140,15 @@ function usbWrite(line){if(writer)writer.write(new TextEncoder().encode(line+'\r
 function usbCmd(id){if(id=='profile')usbWrite('reflow profile '+document.getElementById('prof').value);
  else usbWrite('reflow '+(id=='clear'?'clear':id));}
 function usbClose(){if(poll){clearInterval(poll);poll=null;}writer=null;port=null;
- document.getElementById('usb').style.display='';say('desconectado');}
+ document.getElementById('usb').style.display='';link('desconectado');}
 async function usbConnect(){
- if(!navigator.serial){say('este navegador nao tem Web Serial (use Chrome ou Edge)');return;}
+ if(!navigator.serial){link('este navegador nao tem Web Serial (use Chrome ou Edge)');return;}
  try{
   port=await navigator.serial.requestPort({filters:[{usbVendorId:0x2fe3}]});
   await port.open({baudRate:115200});
- }catch(e){say('nao conectou: '+e.message);return;}
+ }catch(e){link('nao conectou: '+e.message);return;}
  document.getElementById('usb').style.display='none';
- say('conectado pela porta USB');
+ link('conectado pela porta USB');
  writer=port.writable.getWriter();
  var buf='';
  (async function read(){
@@ -161,7 +182,7 @@ var overHttp=(location.protocol=='http:'||location.protocol=='https:')&&
 if(overHttp){startHttp();}
 else{
  document.getElementById('usb').style.display='';
- say(navigator.serial?'clique em Conectar por USB':'abra no Chrome ou Edge para usar a porta USB');
+ link(navigator.serial?'clique em Conectar por USB':'abra no Chrome ou Edge para usar a porta USB');
  cmd=usbCmd;
 }
 </script>
