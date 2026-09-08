@@ -69,6 +69,42 @@ BUILD_ASSERT(CONFIG_ZVFS_POLL_MAX >= MAX_CLIENTS + 1,
 	     "the listening socket, or zsock_poll() fails for ever once the "
 	     "clients are there (RFO-B15)");
 
+/*
+ * RFO-G32. Same failure mode, same cause, one layer down: the app asks for
+ * more net_contexts and connection objects than the upstream defaults give,
+ * and those configdefaults were also parsed after `source "Kconfig.zephyr"`,
+ * so the image was built with the upstream 6 contexts while the file claimed
+ * 10. The server needs one context per socket - the listener plus every open
+ * connection - and one connection object per accepted TCP connection, so the
+ * relation, not the number, is what has to hold.
+ *
+ * At the default four clients the upstream 6 happened to be enough, which is
+ * why nothing complained for as long as it did. At the top of the allowed
+ * range it is not, and reflow.httpwait.max_clients builds exactly there.
+ */
+BUILD_ASSERT(CONFIG_NET_MAX_CONTEXTS >= MAX_CLIENTS + 1,
+	     "CONFIG_NET_MAX_CONTEXTS must cover CONFIG_REFLOW_NET_MAX_CLIENTS plus "
+	     "the listening socket, or accept() runs out of net_context and the "
+	     "server stops answering (RFO-G32)");
+
+BUILD_ASSERT(CONFIG_NET_MAX_CONN >= MAX_CLIENTS,
+	     "CONFIG_NET_MAX_CONN must cover CONFIG_REFLOW_NET_MAX_CLIENTS, or the "
+	     "last clients the range allows cannot connect (RFO-G32)");
+
+/*
+ * The packet and buffer counts are floors the file used to state as
+ * configdefaults. Two of them (NET_PKT_*) are floors above the upstream
+ * default and are supplied there; the NET_BUF_* pair is a floor BELOW it, and
+ * a configdefault could only lower it, so the floor is stated here. Either
+ * way the build is what checks, instead of a comment nobody runs.
+ */
+BUILD_ASSERT(CONFIG_NET_PKT_RX_COUNT >= 16 && CONFIG_NET_PKT_TX_COUNT >= 16,
+	     "the web UI is sized for at least 16 packets per direction (RFO-G32)");
+
+BUILD_ASSERT(CONFIG_NET_BUF_RX_COUNT >= 32 && CONFIG_NET_BUF_TX_COUNT >= 32,
+	     "the web UI is sized for at least 32 network buffers per direction "
+	     "(RFO-G32)");
+
 #define IDLE_BUDGET_MS CONFIG_REFLOW_NET_IDLE_BUDGET_MS
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 

@@ -367,12 +367,9 @@ source "subsys/logging/Kconfig.template.log_config"
 
 endmenu
 
-# Sockets poll() sizing lives in ZVFS since NET_SOCKETS started selecting it
-# (the old NET_SOCKETS_POLL_MAX no longer exists). The web UI polls one
-# listening socket plus REFLOW_NET_MAX_CLIENTS connections, so 8 + 1 covers the
-# whole allowed range of clients.
+# Network sizing for the web UI.
 #
-# THIS BLOCK IS BEFORE `source "Kconfig.zephyr"` ON PURPOSE (RFO-B15).
+# THIS BLOCK IS BEFORE `source "Kconfig.zephyr"` ON PURPOSE (RFO-B15, RFO-G32).
 # `configdefault` inserts its default at the position the symbol's default list
 # had when the block was parsed, and Kconfig then takes the first default whose
 # condition holds. ZVFS_POLL_MAX carries an unconditional `default 3` upstream,
@@ -381,8 +378,43 @@ endmenu
 # CONFIG_ZVFS_POLL_MAX=3 while this file claimed 8, and the server died as soon
 # as three connections were open. Parsed before the tree, this default is first
 # and wins. Anything set in prj.conf or on the command line still beats it.
+#
+# RFO-G32: the sizing symbols below were in the block after the source and had
+# the same defect - measured on rpi_pico2 -S usb-webui, the image built with
+# NET_MAX_CONTEXTS=6, NET_PKT_RX_COUNT=14 and NET_PKT_TX_COUNT=14 while this
+# file claimed 10, 16 and 16. Only NET_MAX_CONN happened to coincide, because
+# the upstream default is also 8. Every one of them is a floor the HTTP server
+# needs, so every one of them belongs before the source.
+
+# Sockets poll() sizing lives in ZVFS since NET_SOCKETS started selecting it
+# (the old NET_SOCKETS_POLL_MAX no longer exists). The web UI polls one
+# listening socket plus REFLOW_NET_MAX_CLIENTS connections, so 8 + 1 covers the
+# whole allowed range of clients.
 configdefault ZVFS_POLL_MAX
 	default 9 if REFLOW_NET
+
+# One net_context per socket: the listener plus every open connection.
+configdefault NET_MAX_CONTEXTS
+	default 10 if REFLOW_NET
+
+# One connection object per accepted TCP connection.
+configdefault NET_MAX_CONN
+	default 8 if REFLOW_NET
+
+configdefault NET_PKT_RX_COUNT
+	default 16 if REFLOW_NET
+
+configdefault NET_PKT_TX_COUNT
+	default 16 if REFLOW_NET
+
+# NET_BUF_RX_COUNT / NET_BUF_TX_COUNT are deliberately NOT here, and no
+# longer anywhere: this file used to ask for 32 of each, and the measurement
+# of RFO-G32 showed the upstream default is 36. 32 was written as a floor the
+# server needs, not as a ceiling, so moving those two defaults before the
+# source would have been the one change that made the image WORSE - four
+# buffers fewer per direction. A `configdefault` cannot express a floor: it
+# either sits behind the upstream default and lies, or wins and lowers it.
+# The floor is asserted in httpd.c instead, where breaking it fails the build.
 
 source "Kconfig.zephyr"
 
@@ -415,24 +447,6 @@ configdefault INPUT_GPIO_KEYS
 # DHCP client for the Wi-Fi link only: on the USB link the oven is the server.
 configdefault NET_DHCPV4
 	default y if REFLOW_LINK_WIFI
-
-configdefault NET_MAX_CONTEXTS
-	default 10 if REFLOW_NET
-
-configdefault NET_MAX_CONN
-	default 8 if REFLOW_NET
-
-configdefault NET_PKT_RX_COUNT
-	default 16 if REFLOW_NET
-
-configdefault NET_PKT_TX_COUNT
-	default 16 if REFLOW_NET
-
-configdefault NET_BUF_RX_COUNT
-	default 32 if REFLOW_NET
-
-configdefault NET_BUF_TX_COUNT
-	default 32 if REFLOW_NET
 
 configdefault HEAP_MEM_POOL_SIZE
 	default 32768 if REFLOW_NET
