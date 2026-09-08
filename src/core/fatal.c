@@ -17,6 +17,15 @@
  *
  * WHY HALT AND NOT CONFIG_RESET_ON_FATAL_ERROR.
  *
+ * First, what this is NOT: halting is not a cost this file introduces. The
+ * kernel's own weak handler (kernel/fatal.c) already ends in LOG_PANIC() plus
+ * `Halting system` and arch_system_halt(), and switches to sys_reboot() only
+ * when CONFIG_RESET_ON_FATAL_ERROR is set - which this project does not set.
+ * So the disposition to stop is today's behaviour, and what this file adds is
+ * the cut. The paragraphs below are the reason not to CHANGE that disposition
+ * to a reset while adding the cut, not a trade being made here for the first
+ * time (RFO-B44 review).
+ *
  * Both leave the gate low - a reset would re-run ssr_safe_init() and claim the
  * pin low again (RFO-B06). The difference is what the oven is afterwards.
  *
@@ -36,9 +45,10 @@
  * asking for anyway. It also preserves the register state that makes RFO-B43
  * diagnosable.
  *
- * So: cut, say so on the console, then halt. Availability is the thing worth
- * losing here, because the alternative spends it on an element that may be
- * energised again by a machine instead of a person.
+ * So: cut, say so on the console, then halt - which is where the kernel was
+ * already going. Availability is not worth buying back here, because the
+ * price is an element that may be energised again by a machine instead of a
+ * person.
  *
  * WHAT THIS DOES NOT COVER. A fault that never becomes fatal - a thread stuck
  * in a loop, a deadlock - does not reach this handler at all; that is watchdog

@@ -189,9 +189,12 @@ void reflow_heater_off(void)
  *   defence that covers it.
  *
  * It logs, and the log line is the only evidence a bench operator gets that
- * the element was de-energised before the board stopped. The caller is
- * responsible for LOG_PANIC() first, so this reaches the console
- * synchronously instead of sitting in a buffer no thread will ever drain.
+ * the element was de-energised before the board stopped. The caller calls
+ * LOG_PANIC() AFTER this, not before: LOG_PANIC() flushes what is already
+ * buffered, so this line still reaches the console synchronously, and the
+ * more elaborate of the two operations does not get to run first on a path
+ * where the gate is what matters. Measured in RFO-B44: the cut and the fatal
+ * error come out on the same timestamp.
  */
 void reflow_heater_emergency_off(void)
 {

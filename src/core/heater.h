@@ -33,6 +33,12 @@ void reflow_heater_off(void);
  * The cost of skipping the lock is that the bookkeeping can be left
  * inconsistent with the pin. That is acceptable and only here: this path ends
  * in a halt or a reset, so nothing reads the bookkeeping again.
+ *
+ * Call this BEFORE LOG_PANIC(), not after. The cut is two register writes;
+ * LOG_PANIC() walks the whole logging subsystem and is the more likely of the
+ * two to fail in a corrupted kernel, so the element comes off first and the
+ * evidence second. Nothing is lost by that order: LOG_PANIC() flushes what is
+ * already buffered, so the line this function logs still reaches the console.
  */
 void reflow_heater_emergency_off(void);
 
