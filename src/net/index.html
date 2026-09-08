@@ -33,6 +33,7 @@ td.v{color:#eee;text-align:right}
 <button class='warn' onclick='cmd("clear")'>Clear fault</button>
 <button id='usb' class='warn' style='display:none' onclick='usbConnect()'>Conectar por USB</button>
 </div>
+<div id='msg'></div>
 <div id='hint'>O token fica so nesta aba, em memoria: nao e salvo nem enviado na pagina.</div>
 <canvas id='c' width='640' height='220'></canvas>
 <table>
@@ -48,6 +49,9 @@ var hist=[],MAXP=600,profs=[],lastProf=-1;
    custom tambem forca preflight CORS, que o forno recusa - e e isso que impede
    uma pagina de outra origem de mandar comando. */
 var cmd=function(id){var q='/api/cmd?id='+id;if(id=='profile')q+='&arg='+document.getElementById('prof').value;
+ /* Limpa aqui, no comeco de cada tentativa: e o que faz a mensagem durar ate a
+    proxima acao e sumir quando o comando seguinte e aceito (RFO-B41). */
+ say('');
  fetch(q,{method:'POST',headers:{'X-Reflow-Token':document.getElementById('tok').value}}).then(function(r){
   if(r.status==401)say('token recusado: confira o campo Token');
   else if(r.status==403)say('recusado: abra esta pagina pelo IP do forno');
@@ -87,7 +91,18 @@ function update(d){
 }
 function addProfiles(list){var sel=document.getElementById('prof');sel.innerHTML='';
  list.forEach(function(p,i){var o=document.createElement('option');o.value=i;o.textContent=p;sel.appendChild(o);});}
-function say(t){document.getElementById('sub').textContent=t;}
+/* RFO-B41: mensagens de comando e de transporte tem elemento proprio, que o
+   update() nunca toca. Enquanto as duas fontes disputavam o #sub, a que roda em
+   laco ganhava sempre: o operador clicava PARAR, o POST era recusado, e o quadro
+   seguinte de telemetria - menos de um segundo depois - reescrevia a linha com
+   "running". Quem olhou para a placa depois de clicar (que e o que se faz depois
+   de clicar em PARAR) nao via nada e acreditava ter parado o forno.
+
+   A mensagem fica ate a PROXIMA ACAO do operador, e nao por tempo: um prazo
+   reintroduz o mesmo defeito com pavio mais longo, porque o instante em que ele
+   desvia o olhar e exatamente o instante em que a mensagem aparece. Um comando
+   aceito depois limpa a mensagem - a acao dele e o reconhecimento. */
+function say(t){var m=document.getElementById('msg');m.textContent=t;m.className=t?'bad':'';}
 
 /* Transporte 1: servido pelo forno (HTTP + server-sent events). */
 function startHttp(){

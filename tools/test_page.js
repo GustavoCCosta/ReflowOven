@@ -75,7 +75,16 @@ function makeDom() {
 		getContext: () => new Proxy({}, { get: () => () => {} }),
 		width: 640, height: 220,
 	});
-	['temp', 'sub', 'sp', 'duty', 'stage', 'el', 'prof', 'c', 'usb'].forEach(mk);
+	/*
+	 * The stubbed ids come from the page, not from a list kept here by hand
+	 * (RFO-B41). A page that grows an element the script writes to would
+	 * otherwise crash the harness with "cannot set textContent of undefined",
+	 * and the same reasoning as inlineStyle() applies: what the page has is a
+	 * fact to read, not a copy to maintain.
+	 */
+	const ids = [...html.matchAll(/id='([A-Za-z0-9_-]+)'/g)].map((m) => m[1]);
+
+	[...new Set(ids)].forEach(mk);
 	els.prof.onchange = null;
 	return {
 		document: {
@@ -91,7 +100,28 @@ function run(locationObj, opts = {}) {
 	const sandbox = {
 		document, location: locationObj, console,
 		navigator: opts.serial ? { serial: { addEventListener() {} } } : {},
-		fetch: () => new Promise(() => {}),
+		/*
+		 * A fetch that never settles is enough to check which transport the
+		 * page picks, but it cannot exercise what the page does with an
+		 * ANSWER - and that is the whole subject of RFO-B41. So: the profile
+		 * list always succeeds, and the command endpoint answers whatever the
+		 * test asked for (opts.cmdStatus), or rejects when it asks for a dead
+		 * link (opts.cmdRejects).
+		 */
+		fetch: (url) => {
+			if (String(url).indexOf('/api/cmd') < 0) {
+				return Promise.resolve({
+					ok: true, status: 200,
+					json: () => Promise.resolve({ profiles: ['a', 'b'] }),
+				});
+			}
+			if (opts.cmdRejects) {
+				return Promise.reject(new Error('network down'));
+			}
+			const status = opts.cmdStatus === undefined ? 204 : opts.cmdStatus;
+
+			return Promise.resolve({ ok: status < 400, status });
+		},
 		EventSource: function () { this.onmessage = null; this.onerror = null; },
 		setInterval: () => 0, clearInterval: () => {},
 		TextEncoder, TextDecoder,
@@ -107,6 +137,17 @@ const sample = {
 	stage_name: 'soak', stage_ms: 12000, total_ms: 102000, uptime_ms: 200000,
 };
 
+/* What the page shows, whichever element it chose to show it in. Assertions
+ * about messages use this instead of naming an element: the page moved its
+ * message channel in RFO-B41 and the facts being asserted did not change. */
+function shown(dom) {
+	return Object.keys(dom.els)
+		.map((k) => `${dom.els[k].textContent}`)
+		.join(' | ');
+}
+
+const settle = () => new Promise((r) => setImmediate(r));
+
 console.log('transport selection');
 const oven = run({ protocol: 'http:', hostname: '192.168.7.1' }, { serial: true });
 check('served by the oven -> USB button hidden',
@@ -116,7 +157,7 @@ check('served by the oven -> USB button hidden',
 const local = run({ protocol: 'file:', hostname: '' }, { serial: true });
 check('opened from file:// -> USB button shown', local.els.usb.style.display === '');
 check('opened from file:// -> prompts to connect',
-      /Conectar por USB/.test(local.els.sub.textContent), local.els.sub.textContent);
+      /Conectar por USB/.test(shown(local)), shown(local));
 
 const host = run({ protocol: 'http:', hostname: 'localhost' }, { serial: true });
 check('served from localhost -> serial mode, not HTTP',
@@ -124,7 +165,7 @@ check('served from localhost -> serial mode, not HTTP',
 
 const noSerial = run({ protocol: 'file:', hostname: '' }, { serial: false });
 check('no Web Serial support -> says to use Chrome or Edge',
-      /Chrome/.test(noSerial.els.sub.textContent), noSerial.els.sub.textContent);
+      /Chrome/.test(shown(noSerial)), shown(noSerial));
 
 console.log('rendering a telemetry object');
 const r = run({ protocol: 'http:', hostname: '192.168.7.1' }, { serial: true });
@@ -163,5 +204,96 @@ noisy.forEach((ln) => {
 check('one JSON line found, prompt and colours ignored', parsed === 1, `parsed=${parsed}`);
 check('profile listing recognised', profiles === 1, `profiles=${profiles}`);
 
-console.log(failures ? `\nFAILED (${failures})` : '\nall page checks passed');
-process.exit(failures ? 1 : 0);
+/*
+ * RFO-B41: a message about a refused command has to survive the telemetry that
+ * keeps arriving behind it.
+ *
+ * The failure this catches is not cosmetic. The operator clicks Stop, the POST
+ * is refused, the page says so - and the next telemetry frame, under a second
+ * later, overwrites the line with "running". Someone who looked at the board
+ * after clicking (which is what one does after clicking Stop) sees nothing at
+ * all and believes the oven was told to stop. Same ending as RFO-B19, with the
+ * element as the culprit instead of the discarded promise.
+ *
+ * The assertion deliberately does not name an element: it asks whether the page
+ * still SHOWS the text anywhere. A fix that moves the message elsewhere still
+ * passes; a fix that only delays the overwrite does not.
+ */
+(async function commandMessages() {
+	console.log('a refused command keeps saying so');
+
+	const refused = [
+		[401, /token/i],
+		[403, /IP do forno/i],
+		[503, /desligado/i],
+		[400, /malformada/i],
+		[418, /recusado/i],
+	];
+
+	for (const [status, expected] of refused) {
+		const d = run({ protocol: 'http:', hostname: '192.168.7.1' },
+			      { serial: true, cmdStatus: status });
+
+		d.sandbox.cmd('stop');
+		await settle();
+		check(`${status} is reported`, expected.test(shown(d)), shown(d));
+
+		/* Three frames, not one: a single frame could pass by accident of
+		 * ordering, and the real page pushes one per second. */
+		d.sandbox.update(sample);
+		d.sandbox.update(sample);
+		d.sandbox.update(sample);
+		check(`${status} survives three telemetry frames`,
+		      expected.test(shown(d)), shown(d));
+	}
+
+	const dead = run({ protocol: 'http:', hostname: '192.168.7.1' },
+			 { serial: true, cmdRejects: true });
+
+	dead.sandbox.cmd('stop');
+	await settle();
+	dead.sandbox.update(sample);
+	check('a dead link survives three telemetry frames',
+	      /sem resposta/.test(shown(dead)), shown(dead));
+
+	/* The cure cannot be freezing the screen. */
+	const live = run({ protocol: 'http:', hostname: '192.168.7.1' },
+			 { serial: true, cmdStatus: 503 });
+
+	live.sandbox.cmd('stop');
+	await settle();
+	live.sandbox.update(sample);
+	check('telemetry keeps updating behind the message',
+	      /183\.3/.test(live.els.temp.innerHTML) &&
+	      live.els.sp.textContent === '180 C',
+	      `${live.els.temp.innerHTML} / ${live.els.sp.textContent}`);
+
+	/*
+	 * And an accepted command must not leave the old refusal on screen. The
+	 * options object is read by the fetch stub on every call, so flipping the
+	 * status here is the same page living through a refusal and then a
+	 * success - which is exactly the sequence an operator produces when the
+	 * first Stop is refused and the second one is not.
+	 */
+	const retryOpts = { serial: true, cmdStatus: 503 };
+	const retry = run({ protocol: 'http:', hostname: '192.168.7.1' }, retryOpts);
+
+	retry.sandbox.cmd('stop');
+	await settle();
+	check('the refusal is on screen before the retry',
+	      /desligado/.test(shown(retry)), shown(retry));
+
+	retryOpts.cmdStatus = 204;
+	retry.sandbox.cmd('stop');
+	await settle();
+	retry.sandbox.update(sample);
+	check('an accepted command clears the old refusal',
+	      !/desligado/.test(shown(retry)), shown(retry));
+})().then(() => {
+	console.log(failures ? `\nFAILED (${failures})` : '\nall page checks passed');
+	process.exit(failures ? 1 : 0);
+}, (e) => {
+	console.log(`  FAIL harness: ${e && e.message}`);
+	console.log(`\nFAILED (${failures + 1})`);
+	process.exit(1);
+});
