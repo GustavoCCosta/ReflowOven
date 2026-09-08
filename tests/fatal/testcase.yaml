@@ -1,0 +1,42 @@
+tests:
+  # The gate goes low when the cut runs, measured on the emulated GPIO from a
+  # gate that is HIGH to begin with.
+  reflow.fatal:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - heater
+      - seguranca
+    extra_configs:
+      - CONFIG_ZTEST=y
+
+  # The same property through a REAL fatal error. Judged by the console because
+  # the CPU halts and nothing in the image can assert afterwards; see src/panic.c
+  # for why it cannot be a ztest.
+  reflow.fatal.panic:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - heater
+      - seguranca
+    # The fatal error IS the subject here, so twister must not treat
+    # "ZEPHYR FATAL ERROR" as the failure.
+    ignore_faults: true
+    harness: console
+    harness_config:
+      type: multi_line
+      ordered: true
+      regex:
+        # Without this line the run proves nothing: a gate that was already low
+        # would make everything below true on an empty handler.
+        - "reflow-fatal: gate before the fault: 1"
+        # Emitted by reflow_heater_emergency_off() itself. Remove the cut from
+        # the handler and this line is what goes missing.
+        - "fatal path: SSR gate forced low"
+        # And the handler reached its end, so the cut was not a side effect of
+        # something else on the way down.
+        - "fatal error \\d+: element cut, halting \\(RFO-B44\\)"

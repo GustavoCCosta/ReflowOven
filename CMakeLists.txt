@@ -18,6 +18,7 @@ target_sources(app PRIVATE
   src/main.c
   src/telemetry_json.c
   src/core/controller.c
+  src/core/fatal.c
   src/core/heater.c
   src/core/pid.c
   src/core/profile.c
