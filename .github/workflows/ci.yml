@@ -217,6 +217,27 @@ jobs:
             toolchain: xtensa-espressif_esp32_zephyr-elf
             overlay: ""
             flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_WIFI=y -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=n -DCONFIG_REFLOW_SHELL=y"
+          - nome: esp32s3-wifi
+            # ESP32-S3-WROOM-1 (Sunton ESP32-8048S043) com a rede LIGADA. O
+            # board conf fixa CONFIG_REFLOW_NET=n porque o escopo do RFO-F04 e
+            # nucleo + shell; a flag abaixo sobrepoe, e o que se mede aqui e
+            # que a folha de rede continua ligavel neste SoC. Ate agora isso
+            # so era medido no esp32 classico, e a combinacao S3+rede compila
+            # (verificado a mao: elf linkado, zero warning, dram0_0 em 49%).
+            # RFO-G34.
+            #
+            # O nome do toolchain traz `s3`: `west sdk install` falha
+            # atomicamente, entao errar este campo derruba a instalacao dos
+            # outros combos tambem -- a licao do RFO-G15. Conferido no gcc que
+            # a build local de fato chamou, em
+            # zephyr-sdk-1.0.1/gnu/xtensa-espressif_esp32s3_zephyr-elf/.
+            #
+            # Os blobs vem do passo `Buscar blobs do HAL Espressif`, que ja
+            # dispara por startsWith(matrix.nome, 'esp32') e busca por SoC.
+            board: esp32s3_devkitc/esp32s3/procpu
+            toolchain: xtensa-espressif_esp32s3_zephyr-elf
+            overlay: ""
+            flags: "-DCONFIG_REFLOW_NET=y -DCONFIG_REFLOW_LINK_WIFI=y -DCONFIG_REFLOW_UI_DISPLAY=n -DCONFIG_REFLOW_UI_INPUT=n -DCONFIG_REFLOW_SHELL=y"
     steps:
       - uses: actions/checkout@v4
         with:
