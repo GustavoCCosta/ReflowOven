@@ -397,9 +397,19 @@ configdefault ZVFS_POLL_MAX
 configdefault NET_MAX_CONTEXTS
 	default 10 if REFLOW_NET
 
-# One connection object per accepted TCP connection.
+# One net_conn per accepted TCP connection, plus one for the listening
+# socket, plus one for the DHCPv4 client on the Wi-Fi link - it registers a
+# UDP conn of its own. 8 + 1 + 1 covers the whole allowed range of clients.
+#
+# RFO-G32 review: the 8 this file used to ask for was not enough at the top of
+# the range, and it coincided with the upstream default, so nothing said so.
+# net_conn is consumed by the same two sides as net_context: tcp_conn_new()
+# registers one per incoming SYN (tcp.c) while net_context_accept() keeps the
+# listener's own registered. With 8 clients that is 9, or 10 with DHCPv4, and
+# the ninth net_conn_register() fails inside tcp_conn_new() - the connection
+# is dropped, which on a SoftAP oven is an operator without the Stop button.
 configdefault NET_MAX_CONN
-	default 8 if REFLOW_NET
+	default 10 if REFLOW_NET
 
 configdefault NET_PKT_RX_COUNT
 	default 16 if REFLOW_NET

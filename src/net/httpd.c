@@ -87,9 +87,27 @@ BUILD_ASSERT(CONFIG_NET_MAX_CONTEXTS >= MAX_CLIENTS + 1,
 	     "the listening socket, or accept() runs out of net_context and the "
 	     "server stops answering (RFO-G32)");
 
-BUILD_ASSERT(CONFIG_NET_MAX_CONN >= MAX_CLIENTS,
-	     "CONFIG_NET_MAX_CONN must cover CONFIG_REFLOW_NET_MAX_CLIENTS, or the "
-	     "last clients the range allows cannot connect (RFO-G32)");
+/*
+ * A net_conn is consumed by the same two sides as a net_context, so this one
+ * counts the listener too: tcp_conn_new() registers a conn of its own for
+ * every incoming SYN, while the listening context keeps the conn that
+ * net_context_accept() gave it. N clients therefore need N + 1.
+ *
+ * And one more on the Wi-Fi link: the DHCPv4 client registers a permanent UDP
+ * conn (net_udp_register() in subsys/net/lib/dhcpv4). It costs a conn and not
+ * a context, which is why only this assertion carries the term.
+ *
+ * Getting the relation wrong here is worse than having no assertion: the
+ * first version of this check said `>= MAX_CLIENTS` and so went green on the
+ * exact configuration that cannot connect its last client - stamping as
+ * verified the thing it claims to prevent.
+ */
+#define DHCPV4_CONNS (IS_ENABLED(CONFIG_NET_DHCPV4) ? 1 : 0)
+
+BUILD_ASSERT(CONFIG_NET_MAX_CONN >= MAX_CLIENTS + 1 + DHCPV4_CONNS,
+	     "CONFIG_NET_MAX_CONN must cover CONFIG_REFLOW_NET_MAX_CLIENTS plus the "
+	     "listening socket plus the DHCPv4 client, or net_conn_register() fails "
+	     "and the last clients the range allows cannot connect (RFO-G32)");
 
 /*
  * The packet and buffer counts are floors the file used to state as
