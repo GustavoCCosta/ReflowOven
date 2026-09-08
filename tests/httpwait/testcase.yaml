@@ -31,3 +31,33 @@ tests:
     extra_configs:
       - CONFIG_REFLOW_NET_MAX_CLIENTS=8
     timeout: 120
+
+  # RFO-G35: the top of the client range on a link where the oven RUNS a DHCPv4
+  # server, which is what REFLOW_LINK_USB_ECM and REFLOW_LINK_WIFI_AP do. That
+  # server opens a BSD UDP socket, costing one net_context and one net_conn on
+  # top of the listener and the clients - the term the first version of the
+  # assertions in httpd.c did not carry.
+  #
+  # build_only, and honestly so: nothing here runs a DHCPv4 server or a real
+  # link, and the suite has no bench for one. What this scenario adds is that
+  # the arithmetic is checked in CI at the configuration that needs the most of
+  # everything. The CI board matrix does build the USB link, but at the default
+  # four clients, where the numbers are comfortable and a value lowered below
+  # the requirement would still compile.
+  #
+  # It cannot catch a WEAK assertion - the shipped values satisfy both the old
+  # and the new arithmetic - and that is not what it is for. The assertion's own
+  # correctness is what the mutation in the PR proves.
+  reflow.httpwait.dhcpv4_server:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    build_only: true
+    tags:
+      - reflow
+      - net
+      - httpd
+      - configuracao
+    extra_configs:
+      - CONFIG_REFLOW_NET_MAX_CLIENTS=8
+      - CONFIG_NET_DHCPV4_SERVER=y
