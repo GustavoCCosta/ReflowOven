@@ -46,6 +46,21 @@ DEFINICAO = re.compile(
     r"\b" + HANDLER + r"\s*\([^;{]*\)\s*\{", re.S)
 
 
+def sem_comentarios(texto):
+    """O texto sem os comentarios `#` de CMake, linha por linha.
+
+    Sem isto o guarda abaixo e enganado por uma linha COMENTADA (RFO-G37): ela
+    continua dentro do bloco, entao a busca por substring a encontra, mas o
+    CMake a ignora e o firmware perde o handler. Medido pelo Q.A. no #132 -
+    trocar `src/core/fatal.c` por `# src/core/fatal.c` deixava os 20 testes
+    verdes com o forno voltando ao defeito da #130.
+
+    O acidente mais provavel - a linha APAGADA num rebase - o guarda ja pegava.
+    Este e o outro: "comentei para depurar e esqueci de descomentar".
+    """
+    return re.sub(r'#[^\n]*', '', texto)
+
+
 def bloco_target_sources_incondicional(texto):
     """O conteudo do `target_sources(app PRIVATE ...)` sem `_ifdef`.
 
@@ -105,9 +120,10 @@ class TestHandlerFatalEstaNoBuildDaAplicacao(unittest.TestCase):
             bloco,
             "nao achei target_sources(app PRIVATE ...) no CMakeLists.txt")
 
-        # O caminho aparece no CMakeLists relativo a raiz da aplicacao.
+        # O caminho aparece no CMakeLists relativo a raiz da aplicacao, e
+        # comentario nao conta como fonte (RFO-G37).
         self.assertIn(
-            definidor, bloco,
+            definidor, sem_comentarios(bloco),
             "%s define %s e NAO esta no target_sources(app PRIVATE) "
             "incondicional. A imagem que vai para a placa perde o handler e "
             "qualquer erro fatal volta a deixar o gate do SSR no ultimo nivel "
