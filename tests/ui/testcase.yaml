@@ -1,0 +1,30 @@
+tests:
+  # Painel pronto: o caminho saudavel. O observador tem de continuar habilitado
+  # e a thread drenando - e onde apareceria um conserto que desabilitou o
+  # observador cedo demais ou de forma incondicional.
+  reflow.ui:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - ui
+      - desempenho
+    timeout: 120
+
+  # Painel indisponivel: o defeito do RFO-B12. A prontidao do device escolhido e
+  # negada num SYS_INIT em POST_KERNEL, antes de qualquer thread rodar, porque a
+  # thread do display consulta device_is_ready() uma vez so e 500 ms depois do
+  # boot - negar depois nao a faz voltar atras, e por isso as duas propriedades
+  # nao cabem na mesma imagem.
+  reflow.ui.no_panel:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - ui
+      - desempenho
+    extra_configs:
+      - CONFIG_REFLOW_TEST_DENY_PANEL=y
+    timeout: 120
