@@ -122,16 +122,32 @@ git status --porcelain        # tem que listar M e D no codigo-fonte
 **5. Emita o veredito** no próprio PR.
 
 ```bash
+# <PR> e o numero do pull request; <ISSUE> e o da issue que ele fecha. Os dois
+# NAO sao intercambiaveis, e trocar um pelo outro nao da erro: pull requests e
+# issues compartilham a numeracao no GitHub, entao `gh issue edit <PR>` edita a
+# propria PR em silencio (RFO-G36). Ache o numero certo com
+#   gh pr view <PR> --json closingIssuesReferences
 GH_TOKEN=$(gh auth token --user QualityAssurance2007) \
-  gh pr review <N> --request-changes --body "..."
-gh pr edit <N> --add-label estado:ajustes          # `pr review` não aceita label
+  gh pr review <PR> --request-changes --body "..."
+gh issue edit <ISSUE> --add-label estado:ajustes --remove-label estado:revisao
 
 GH_TOKEN=$(gh auth token --user QualityAssurance2007) \
-  gh pr review <N> --approve --body "..."          # deixa o merge para o Gerente
+  gh pr review <PR> --approve --body "..."        # deixa o merge para o Gerente
 ```
 
+**O estado vive na issue, nunca na PR.** A secao 3 do PROCESSO poe a label na
+issue, e a ordem de puxada da secao 4 le `gh issue list --label estado:ajustes`:
+label de estado numa PR vai para um objeto que nada le, e o retrabalho fica
+invisivel para o Dev, que abre frente nova enquanto a devolucao espera. Foi o
+que aconteceu tres vezes num dia (RFO-G36).
+
+**A aprovacao nao mexe em label, e isso e deliberado.** Nao ha `estado:aprovado`:
+quem fecha a issue e o `Closes #N` no merge, e ate o Gerente mesclar o estado
+segue sendo `estado:revisao` (secao 3). Nao "conserte" isto acrescentando uma
+transicao que o PROCESSO nao tem.
+
 O veredito agora é uma review nativa, achável em
-`gh pr view <N> --json reviews`, e não um comentário reconhecível só por
+`gh pr view <PR> --json reviews`, e não um comentário reconhecível só por
 convenção de texto. Comentário comum não satisfaz a proteção da `main`: PR sem
 essa aprovação não é mergeável.
 
