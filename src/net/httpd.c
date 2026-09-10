@@ -82,10 +82,34 @@ BUILD_ASSERT(CONFIG_ZVFS_POLL_MAX >= MAX_CLIENTS + 1,
  * why nothing complained for as long as it did. At the top of the allowed
  * range it is not, and reflow.httpwait.max_clients builds exactly there.
  */
-BUILD_ASSERT(CONFIG_NET_MAX_CONTEXTS >= MAX_CLIENTS + 1,
+/*
+ * RFO-G35. The DHCPv4 terms, and which side of DHCP each one is.
+ *
+ * CONFIG_NET_DHCPV4 is the CLIENT, and only the Wi-Fi station link turns it
+ * on. It registers a permanent UDP conn through net_udp_register()
+ * (subsys/net/lib/dhcpv4/dhcpv4.c) and never calls net_context_get(), so it
+ * costs a conn and no context.
+ *
+ * CONFIG_NET_DHCPV4_SERVER is the other two links: REFLOW_LINK_USB_ECM hands
+ * the host an address, and REFLOW_LINK_WIFI_AP is the network. The server
+ * opens a BSD UDP socket (zsock_socket() in dhcpv4_server.c), and a socket is
+ * a net_context whose bind+recv registers a conn - so it costs BOTH, one of
+ * each.
+ *
+ * The first version of these assertions (RFO-G32) carried only the client
+ * term, and carried it on the conn assertion alone. On the two links where
+ * the oven hands out addresses, the real consumption was one MORE than the
+ * assertions demanded, of each kind. Nothing broke, because the configdefaults
+ * of 10 happened to cover it - and 'happens to' is the exact thing the
+ * assertions exist to remove.
+ */
+#define DHCPV4_CLIENT_CONNS   (IS_ENABLED(CONFIG_NET_DHCPV4) ? 1 : 0)
+#define DHCPV4_SERVER_SOCKETS (IS_ENABLED(CONFIG_NET_DHCPV4_SERVER) ? 1 : 0)
+
+BUILD_ASSERT(CONFIG_NET_MAX_CONTEXTS >= MAX_CLIENTS + 1 + DHCPV4_SERVER_SOCKETS,
 	     "CONFIG_NET_MAX_CONTEXTS must cover CONFIG_REFLOW_NET_MAX_CLIENTS plus "
-	     "the listening socket, or accept() runs out of net_context and the "
-	     "server stops answering (RFO-G32)");
+	     "the listening socket plus the DHCPv4 server's socket, or accept() "
+	     "runs out of net_context and the server stops answering (RFO-G35)");
 
 /*
  * A net_conn is consumed by the same two sides as a net_context, so this one
@@ -93,21 +117,23 @@ BUILD_ASSERT(CONFIG_NET_MAX_CONTEXTS >= MAX_CLIENTS + 1,
  * every incoming SYN, while the listening context keeps the conn that
  * net_context_accept() gave it. N clients therefore need N + 1.
  *
- * And one more on the Wi-Fi link: the DHCPv4 client registers a permanent UDP
- * conn (net_udp_register() in subsys/net/lib/dhcpv4). It costs a conn and not
- * a context, which is why only this assertion carries the term.
+ * And one more for whichever side of DHCP the link brings: see the RFO-G35
+ * note above. Both terms are written out rather than folded into one, even
+ * though the REFLOW_LINK choice makes them mutually exclusive today: if a
+ * build ever carries client and server at once, the arithmetic should demand
+ * room for both instead of quietly assuming only one can appear.
  *
  * Getting the relation wrong here is worse than having no assertion: the
  * first version of this check said `>= MAX_CLIENTS` and so went green on the
  * exact configuration that cannot connect its last client - stamping as
  * verified the thing it claims to prevent.
  */
-#define DHCPV4_CONNS (IS_ENABLED(CONFIG_NET_DHCPV4) ? 1 : 0)
-
-BUILD_ASSERT(CONFIG_NET_MAX_CONN >= MAX_CLIENTS + 1 + DHCPV4_CONNS,
+BUILD_ASSERT(CONFIG_NET_MAX_CONN >=
+	     MAX_CLIENTS + 1 + DHCPV4_CLIENT_CONNS + DHCPV4_SERVER_SOCKETS,
 	     "CONFIG_NET_MAX_CONN must cover CONFIG_REFLOW_NET_MAX_CLIENTS plus the "
-	     "listening socket plus the DHCPv4 client, or net_conn_register() fails "
-	     "and the last clients the range allows cannot connect (RFO-G32)");
+	     "listening socket plus whichever side of DHCPv4 the link brings, or "
+	     "net_conn_register() fails and the last clients the range allows "
+	     "cannot connect (RFO-G35)");
 
 /*
  * The packet and buffer counts are floors the file used to state as
