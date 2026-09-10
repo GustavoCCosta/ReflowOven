@@ -60,9 +60,66 @@ def sem_comentarios(texto):
     Nos dois sentidos: um comentario que diga "nao toma k_spin_lock" nao deve
     reprovar, e um `k_spin_lock` comentado nao deve absolver — o segundo caso e
     o mesmo engano que a ponta 1 do RFO-G37 conserta no guarda do CMakeLists.
+
+    Varredor com estado, e nao `re.sub(r"/\\*.*?\\*/", ...)`, porque a regex nao
+    sabe o que e string. O `heater.c:17` e
+
+        #error "Missing devicetree alias 'reflow-ssr' (see boards/*.overlay)"
+
+    e aquele `/*` dentro da string abria um comentario que so fechava no `*/`
+    real da linha 65 — engolindo a declaracao do spinlock, os `#define`, o
+    `gpio_dt_spec` e a funcao `drive()`. O guarda ficava cego para `drive`, que
+    e justamente o destino natural de uma limpeza de duplicacao no corte
+    (RFO-G37, segundo achado do Q.A. na review do #139).
+
+    Pior que o tamanho do ponto cego era ele nao ser estavel: terminava no
+    proximo `*/` do arquivo, entao editar um comentario sem relacao nenhuma com
+    este guarda mexia no que ficava escondido.
+
+    Comentario vira espaco, e as quebras de linha de dentro dele sobrevivem, para
+    o texto limpo manter a estrutura de linhas do original.
     """
-    texto = re.sub(r"/\*.*?\*/", "", texto, flags=re.S)
-    return re.sub(r"//[^\n]*", "", texto)
+    saida = []
+    i = 0
+    n = len(texto)
+    while i < n:
+        c = texto[i]
+
+        # String ou char literal: copiado inteiro, e nada dentro dele conta.
+        if c in '"\'':
+            fecha = c
+            saida.append(c)
+            i += 1
+            while i < n:
+                if texto[i] == "\\" and i + 1 < n:
+                    saida.append(texto[i:i + 2])
+                    i += 2
+                    continue
+                saida.append(texto[i])
+                if texto[i] == fecha:
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        if texto.startswith("/*", i):
+            fim = texto.find("*/", i + 2)
+            fim = n if fim < 0 else fim + 2
+            saida.append(" ")
+            saida.append("\n" * texto.count("\n", i, fim))
+            i = fim
+            continue
+
+        if texto.startswith("//", i):
+            fim = texto.find("\n", i)
+            i = n if fim < 0 else fim
+            saida.append(" ")
+            continue
+
+        saida.append(c)
+        i += 1
+
+    return "".join(saida)
 
 
 def corpo_da_funcao(fonte, nome):
@@ -190,6 +247,37 @@ class TestCorteFatalNaoTomaLock(unittest.TestCase):
             "O corte escreve o pino direto de proposito, e a duplicacao das tres "
             "linhas e o preco disso. Tomadoras de lock derivadas do fonte: %r"
             % (FUNCAO, achados, travantes))
+
+    def test_o_recorte_enxerga_todas_as_funcoes_do_modulo(self):
+        """Ponto cego calado e pior que guarda ausente.
+
+        Enquanto `sem_comentarios()` confundia `/*` dentro de string com
+        abertura de comentario, `drive()` desaparecia do recorte - e `drive()` e
+        o destino mais natural de uma limpeza de duplicacao no corte. O guarda
+        ficava verde com o corte chamando quem toma o lock.
+
+        Subconjunto e nao igualdade: funcao nova no modulo nao deve quebrar este
+        teste, mas nenhuma das de hoje pode sumir da vista.
+        """
+        vistas = set(funcoes_do_arquivo(self.fonte))
+        esperadas = {
+            "drive",
+            "ssr_safe_init",
+            "reflow_heater_init",
+            "reflow_heater_set_duty",
+            "reflow_heater_off",
+            "reflow_heater_emergency_off",
+            "reflow_heater_tick",
+            "reflow_heater_duty",
+            "reflow_heater_is_on",
+        }
+
+        self.assertEqual(
+            set(), esperadas - vistas,
+            "o recorte nao enxerga %r. Funcao invisivel nao entra na lista de "
+            "tomadoras de lock, entao o corte pode chamar uma delas e o guarda "
+            "fica verde (RFO-G37). Vistas: %r"
+            % (sorted(esperadas - vistas), sorted(vistas)))
 
     def test_o_guarda_olha_o_corpo_e_nao_o_arquivo(self):
         """Fixture: o resto do heater.c TEM de ter spinlock, e legitimo.
