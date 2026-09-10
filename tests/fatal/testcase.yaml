@@ -1,0 +1,59 @@
+tests:
+  # The gate goes low when the cut runs, measured on the emulated GPIO from a
+  # gate that is HIGH to begin with.
+  reflow.fatal:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - heater
+      - seguranca
+    extra_configs:
+      - CONFIG_ZTEST=y
+
+  # The same property through a REAL fatal error. Judged by the console because
+  # the CPU halts and nothing in the image can assert afterwards; see src/panic.c
+  # for why it cannot be a ztest.
+  #
+  # qemu_x86 ONLY, and this is a limitation of the runner, not of the test.
+  # On native_sim the image is a host process and k_fatal_halt() exits it with a
+  # non-zero code. Twister judges that code before it judges the harness:
+  # handlers.py:200 fails the instance on `returncode != 0 and not
+  # self.ignore_crash`, and only the QEMU handler ever sets ignore_crash
+  # (handlers.py:1024, from ignore_qemu_crash) - the native binary handler
+  # never does. So on native_sim this scenario fails with rc=1 even though all
+  # three regexes below matched: the CI run of 2026-09-08 printed the high gate,
+  # the cut and the handler's own line, and still failed on the exit code.
+  #
+  # No assertion is dropped to get here. The property this scenario adds -
+  # that the handler really is the one the kernel reaches - is exercised on
+  # every local `flow test --board qemu_x86`, which PROCESSO.md section 10
+  # designates as the local suite. What runs in CI is reflow.fatal above, and
+  # that scenario alone goes red under the mutation.
+  reflow.fatal.panic:
+    platform_allow:
+      - qemu_x86
+    tags:
+      - reflow
+      - heater
+      - seguranca
+    # The fatal error IS the subject here, so twister must not treat
+    # "ZEPHYR FATAL ERROR" as the failure.
+    ignore_faults: true
+    # And the halt itself must not be read as a crash.
+    ignore_qemu_crash: true
+    harness: console
+    harness_config:
+      type: multi_line
+      ordered: true
+      regex:
+        # Without this line the run proves nothing: a gate that was already low
+        # would make everything below true on an empty handler.
+        - "reflow-fatal: gate before the fault: 1"
+        # Emitted by reflow_heater_emergency_off() itself. Remove the cut from
+        # the handler and this line is what goes missing.
+        - "fatal path: SSR gate forced low"
+        # And the handler reached its end, so the cut was not a side effect of
+        # something else on the way down.
+        - "fatal error \\d+: element cut, halting \\(RFO-B44\\)"

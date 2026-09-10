@@ -171,6 +171,45 @@ void reflow_heater_off(void)
 	k_spin_unlock(&lock, key);
 }
 
+/*
+ * RFO-B44. The fatal-error cut. Everything about it is chosen so that it
+ * cannot block, because the caller is a CPU that is about to stop:
+ *
+ * - No k_spin_lock(). A fatal error raised inside this module arrives with
+ *   the lock held, and on a single core waiting for it never ends. The gate
+ *   is what matters here, not the coherence of req_permille.
+ * - gpio_pin_set_dt() and not gpio_pin_configure_dt(): a set is a register
+ *   write on every driver this project builds for, while configure walks
+ *   more of the driver and, on some, takes the driver's own lock - which the
+ *   faulting context may equally be holding.
+ * - gpio_is_ready_dt() first, because a fatal error can happen before
+ *   ssr_safe_init() ever ran. If the pin was never claimed, the gate is in
+ *   its reset state and no software can help: that window is the RFO-B06
+ *   window, and the hardware pull-down README.md asks for is the only
+ *   defence that covers it.
+ *
+ * It logs, and the log line is the only evidence a bench operator gets that
+ * the element was de-energised before the board stopped. The caller calls
+ * LOG_PANIC() AFTER this, not before: LOG_PANIC() flushes what is already
+ * buffered, so this line still reaches the console synchronously, and the
+ * more elaborate of the two operations does not get to run first on a path
+ * where the gate is what matters. Measured in RFO-B44: the cut and the fatal
+ * error come out on the same timestamp.
+ */
+void reflow_heater_emergency_off(void)
+{
+	if (!gpio_is_ready_dt(&ssr)) {
+		LOG_ERR("fatal path: SSR gpio not ready, gate left in reset state");
+		return;
+	}
+
+	(void)gpio_pin_set_dt(&ssr, 0);
+	output_on = false;
+	req_permille = 0;
+
+	LOG_ERR("fatal path: SSR gate forced low");
+}
+
 void reflow_heater_tick(uint32_t dt_ms)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
