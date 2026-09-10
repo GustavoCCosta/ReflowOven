@@ -58,7 +58,12 @@ def sem_comentarios(texto):
     O acidente mais provavel - a linha APAGADA num rebase - o guarda ja pegava.
     Este e o outro: "comentei para depurar e esqueci de descomentar".
     """
-    return re.sub(r'#[^\n]*', '', texto)
+    # Comentario de bloco primeiro: `#[[ ... ]]` abrange varias linhas, e cortar
+    # `#` ate o fim da linha antes deixaria intactas as linhas de dentro dele.
+    # Forma exotica - ninguem desativa uma linha de fonte assim, e o Q.A. a
+    # classificou como tal na review do #139 - mas cobrir custou uma linha.
+    texto = re.sub(r"#\[\[.*?\]\]", "", texto, flags=re.S)
+    return re.sub(r"#[^\n]*", "", texto)
 
 
 def bloco_target_sources_incondicional(texto):

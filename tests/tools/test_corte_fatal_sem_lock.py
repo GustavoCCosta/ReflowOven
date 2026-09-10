@@ -88,6 +88,36 @@ def corpo_da_funcao(fonte, nome):
     return None
 
 
+def funcoes_do_arquivo(fonte):
+    """{nome: corpo} de cada funcao definida no arquivo.
+
+    Ancorado em inicio de linha: definicao de funcao comeca na coluna 0 neste
+    projeto, e statement dentro de funcao vem indentado, entao `if (...) {` nao
+    entra. `BUILD_ASSERT(...)` e `SYS_INIT(...)` tambem nao, porque terminam em
+    `;` e a busca proibe `;` antes da chave.
+    """
+    saida = {}
+    padrao = r"^[A-Za-z_][A-Za-z0-9_ \t\*]*?\b([a-z_][A-Za-z0-9_]*)\s*\([^;{]*\)\s*\{"
+    for m in re.finditer(padrao, fonte, re.M):
+        nome = m.group(1)
+        corpo = corpo_da_funcao(fonte, nome)
+        if corpo is not None:
+            saida[nome] = corpo
+    return saida
+
+
+def funcoes_que_tomam_lock(fonte):
+    """Os nomes que o corte nao pode chamar, DERIVADOS do fonte.
+
+    Derivados e nao fixados numa lista aqui (RFO-G37, achado do Q.A. na review
+    do #139): uma funcao nova que passe a tomar o lock entra na proibicao sozinha,
+    sem ninguem lembrar de atualizar o teste. Lista fixa envelhece exatamente no
+    dia em que o modulo cresce.
+    """
+    return sorted(nome for nome, corpo in funcoes_do_arquivo(fonte).items()
+                  if any(b in corpo for b in BLOQUEANTES))
+
+
 class TestCorteFatalNaoTomaLock(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -118,6 +148,48 @@ class TestCorteFatalNaoTomaLock(unittest.TestCase):
             "pino sem lock de proposito, e paga com contabilidade possivelmente "
             "incoerente - aceitavel porque o caminho termina em halt."
             % (FUNCAO, achados))
+
+    def test_o_corpo_do_corte_nao_chama_quem_toma_lock(self):
+        """Lock indireto trava igual, e chegar nele e o refactor mais natural.
+
+        O corte duplica em tres linhas o que `reflow_heater_off()` faz, entao a
+        primeira coisa que uma limpeza de duplicacao propoe e chamar a funcao
+        existente - que abre com `k_spin_lock(&lock)`. Nao ha lock literal no
+        corpo, e o deadlock e inteiro: erro fatal dentro do heater.c, lock ja
+        tomado, o corte espera para sempre e o gate fica onde a janela de PWM o
+        deixou.
+
+        A mutacao anterior era alguem ACRESCENTANDO um lock; esta e alguem
+        REMOVENDO duplicacao, com intencao melhor e por isso mais provavel
+        (RFO-G37, achado do Q.A. na review do #139).
+
+        Cobre chamada indireta dentro do MODULO, que e onde o lock mora. Nao e
+        analise de grafo de chamadas e nao pretende ser.
+        """
+        corpo = corpo_da_funcao(self.fonte, FUNCAO)
+        self.assertIsNotNone(corpo, "%s() nao existe" % FUNCAO)
+
+        travantes = [n for n in funcoes_que_tomam_lock(self.fonte) if n != FUNCAO]
+
+        # Fixture: se a derivacao nao achar nada, o teste abaixo nao mede nada.
+        self.assertTrue(
+            travantes,
+            "nenhuma funcao do heater.c aparece como tomadora de lock. Ou o "
+            "modulo perdeu o lock que protege o duty, ou o recorte de funcoes "
+            "parou de funcionar - nos dois casos este guarda ficou vacuo")
+
+        achados = [n for n in travantes
+                   if re.search(r"\b" + re.escape(n) + r"\s*\(", corpo)]
+
+        self.assertEqual(
+            [], achados,
+            "%s() chama %r, e essas funcoes tomam o spinlock do modulo. Um erro "
+            "fatal levantado dentro do heater.c chega com o lock tomado, entao "
+            "chamar qualquer uma delas ali trava em vez de cortar - com a "
+            "resistencia no nivel que a janela de PWM deixou (RFO-B44, #130). "
+            "O corte escreve o pino direto de proposito, e a duplicacao das tres "
+            "linhas e o preco disso. Tomadoras de lock derivadas do fonte: %r"
+            % (FUNCAO, achados, travantes))
 
     def test_o_guarda_olha_o_corpo_e_nao_o_arquivo(self):
         """Fixture: o resto do heater.c TEM de ter spinlock, e legitimo.
