@@ -46,6 +46,40 @@ def linhas(caminho):
     return caminho.read_text(encoding="utf-8").splitlines()
 
 
+def comandos_logicos(ls):
+    """Pares (numero da primeira linha, comando com as continuacoes juntas).
+
+    A janela tem de ser o comando de shell, nao a linha fisica. Varrer linha a
+    linha deixa passar exatamente a forma que o `QA.md` usa por convencao:
+
+        gh pr edit <PR> \\
+          --add-label estado:ajustes
+
+    e o bloco guardado quebra linha assim tres linhas acima, para o scanner de
+    identidade continuar verde. Ou seja: a edicao natural do documento derrotava
+    o guarda (RFO-G37, achado do Q.A. na review do #135).
+
+    Este e o mesmo raciocinio do `comando_logico()` do
+    `test_papeis_identidade.py` ao lado, e as seis linhas estao duplicadas de
+    proposito: importar entre dois modulos de teste faria renomear um quebrar o
+    outro, e nenhum dos dois deve depender do vizinho para medir. Se um terceiro
+    guarda precisar disto, ai vale modulo compartilhado.
+    """
+    saida = []
+    i = 0
+    while i < len(ls):
+        inicio = i
+        partes = [ls[i]]
+        while ls[i].rstrip().endswith("\\") and i + 1 < len(ls):
+            i += 1
+            partes.append(ls[i])
+        # As continuacoes viram uma linha so, para a regex de uma linha valer.
+        junto = "\n".join(partes)
+        saida.append((inicio + 1, re.sub(r"\\\s*\n\s*", " ", junto)))
+        i += 1
+    return saida
+
+
 class TestEstadoVaiNaIssue(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -64,9 +98,9 @@ class TestEstadoVaiNaIssue(unittest.TestCase):
         """`gh pr edit --add-label estado:` poe o estado onde nada o le."""
         achados = []
         for caminho in self.arquivos:
-            for i, linha in enumerate(linhas(caminho)):
-                if PR_EDIT_ESTADO.search(linha):
-                    achados.append((caminho.name, i + 1, linha.strip()))
+            for numero, comando in comandos_logicos(linhas(caminho)):
+                if PR_EDIT_ESTADO.search(comando):
+                    achados.append((caminho.name, numero, comando.strip()))
 
         self.assertEqual(
             [], achados,
@@ -75,6 +109,38 @@ class TestEstadoVaiNaIssue(unittest.TestCase):
             "`gh issue list --label estado:ajustes`, entao uma label no PR faz "
             "o retrabalho ficar invisivel para o Dev (RFO-G36). Use "
             "`gh issue edit <numero da issue>`. Achei: %r" % (achados,))
+
+    def test_o_detector_pega_as_tres_formas(self):
+        """As sondas do Q.A. na review do #135, mecanizadas.
+
+        Um guarda de fonte e tao bom quanto a sua janela, e a deste era a linha
+        fisica: a forma B passava verde, e B nao e invencao - e a convencao do
+        proprio bloco do `QA.md`, que quebra linha com `\\` tres linhas acima do
+        comando corrigido. Ficam aqui para que a janela nao possa encolher de
+        novo sem alguem ver.
+        """
+        casos = [
+            # (rotulo, linhas, deve ser flagrado)
+            ("A: uma linha, o defeito que existia",
+             ["gh pr edit <N> --add-label estado:ajustes"], True),
+            ("B: continuacao de linha, a forma que escapava",
+             ["gh pr edit <PR> \\", "  --add-label estado:ajustes"], True),
+            ("B2: continuacao com o label antes do numero",
+             ["gh pr edit \\", "  --add-label estado:ajustes <PR>"], True),
+            ("C: gh issue edit, a forma certa",
+             ["gh issue edit <ISSUE> --add-label estado:ajustes"], False),
+            ("D: prosa citando estado:ajustes e gh pr edit em linhas distintas",
+             ["O Q.A. poe `estado:ajustes` na issue.",
+              "Nao use `gh pr edit` para isso."], False),
+        ]
+
+        for rotulo, ls, esperado in casos:
+            flagrado = any(PR_EDIT_ESTADO.search(cmd)
+                           for _, cmd in comandos_logicos(ls))
+            self.assertEqual(
+                esperado, flagrado,
+                "%s: esperava flagrado=%s, deu %s. Entrada: %r"
+                % (rotulo, esperado, flagrado, ls))
 
     def test_cada_papel_edita_estado_pela_issue(self):
         """O contrapositivo: quem move estado tem de faze-lo por `gh issue edit`.
