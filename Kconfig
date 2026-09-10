@@ -393,6 +393,23 @@ endmenu
 configdefault ZVFS_POLL_MAX
 	default 9 if REFLOW_NET
 
+# The send timeout on an accepted socket, without which zsock_send() can park
+# the server thread on one client for ever (RFO-B46).
+#
+# setsockopt(SO_SNDTIMEO) is gated on this symbol - sockets_inet.c wraps the
+# whole case in IS_ENABLED(CONFIG_NET_CONTEXT_SNDTIMEO) and falls through to
+# ENOTSUP without it - and upstream declares it as a plain bool with no
+# `default y`. So the call failed with ENOTSUP on every target this project
+# ever built, the httpd.c warning fired once per accepted connection, and the
+# comment above send_all() claimed a guarantee that never held.
+#
+# In THIS block for the same reason as its neighbours (RFO-B15, RFO-G32): a
+# configdefault parsed after the Zephyr tree lands behind the upstream default
+# and never applies. Here that would be silent - the symbol would stay off and
+# the only sign would be a warning in a log nobody reads.
+configdefault NET_CONTEXT_SNDTIMEO
+	default y if REFLOW_NET
+
 # One net_context per socket: the listener plus every open connection.
 configdefault NET_MAX_CONTEXTS
 	default 10 if REFLOW_NET
