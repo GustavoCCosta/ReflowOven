@@ -434,14 +434,41 @@ configdefault NET_PKT_RX_COUNT
 configdefault NET_PKT_TX_COUNT
 	default 16 if REFLOW_NET
 
-# NET_BUF_RX_COUNT / NET_BUF_TX_COUNT are deliberately NOT here, and no
-# longer anywhere: this file used to ask for 32 of each, and the measurement
-# of RFO-G32 showed the upstream default is 36. 32 was written as a floor the
-# server needs, not as a ceiling, so moving those two defaults before the
-# source would have been the one change that made the image WORSE - four
-# buffers fewer per direction. A `configdefault` cannot express a floor: it
-# either sits behind the upstream default and lies, or wins and lowers it.
-# The floor is asserted in httpd.c instead, where breaking it fails the build.
+# RFO-B47. O par NET_BUF_* volta a ser dimensionado aqui, e o valor e 36 -
+# que NAO e numero novo: e exatamente o que todo build deste projeto teve ate
+# o upstream mudar, e o que as medicoes do RFO-G32 (#128) registraram.
+#
+# O RFO-G32 tinha removido estes dois com um argumento bom e explicitamente
+# condicionado: o upstream dava 36, e um configdefault so conseguiria ABAIXAR
+# para os 32 do piso. Em 2026-08-23 o upstream trocou a condicao (commit
+# a3105999560, 'net: ip: limit larger ethernet defaults'):
+#
+#     -default 36 if NET_L2_ETHERNET
+#     +default 36 if NET_PKT_LARGE_DEFAULTS
+#      default 16
+#
+# e NET_PKT_LARGE_DEFAULTS e `default y` para ETH_DRIVER, NET_SLIP_TAP e
+# WIFI-nao-scan. O link USB ECM liga NET_L2_ETHERNET sem ser nenhum dos tres,
+# entao o alvo principal do projeto passou a receber 16 - abaixo do piso de 32
+# que a UI web precisa - e o BUILD_ASSERT do httpd.c parou o build, que e
+# exatamente o que ele existe para fazer. Os alvos Wi-Fi nao foram atingidos
+# porque WIFI ainda liga LARGE_DEFAULTS.
+#
+# Escolhi 36 e nao 32: com 32 este arquivo passaria a ABAIXAR o valor em toda
+# arvore que ainda de 36, que e a mudanca que o #128 recusou com razao. Com 36
+# ninguem perde buffer em arvore nenhuma, e o piso de 32 do BUILD_ASSERT fica
+# intocado - ele continua sendo quem reprova o build se este numero cair.
+#
+# O que se perde, dito em voz alta: se o upstream um dia der MAIS que 36, este
+# configdefault passa a limitar em 36. Kconfig nao tem max(), entao piso de
+# verdade so com simbolo proprio e derivacao - mais verboso, e a folga que ele
+# compraria e sobre um numero que ninguem mediu precisar.
+configdefault NET_BUF_RX_COUNT
+	default 36 if REFLOW_NET
+
+configdefault NET_BUF_TX_COUNT
+	default 36 if REFLOW_NET
+
 
 source "Kconfig.zephyr"
 
