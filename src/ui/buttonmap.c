@@ -1,12 +1,12 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * RFO-B13. A pressao longa era CLEAR_FAULT incondicional, e o handle_cmd()
- * descarta CLEAR_FAULT fora de FAULT sem log e sem mudar a UI. Entao o operador
- * que segurava o botao com a corrida em curso - com a intencao de PARAR - via o
- * forno continuar aquecendo e nada lhe dizia que nao foi obedecido. Terceiro
- * ticket da mesma familia (RFO-B19, RFO-B41), e este no unico controle que
- * existe quando nao ha rede.
+ * RFO-B13. A long press was an unconditional CLEAR_FAULT, and handle_cmd()
+ * discards CLEAR_FAULT outside FAULT with no log and no change on screen. So
+ * the operator who held the button during a run - meaning STOP - watched the
+ * oven keep heating with nothing telling them it had not been obeyed. Third
+ * ticket of that family (RFO-B19, RFO-B41), and this one is in the only control
+ * that exists when there is no network.
  */
 
 #include "buttonmap.h"
@@ -16,18 +16,20 @@
 int reflow_button_decide(bool state_known, uint8_t state, bool long_press)
 {
 	/*
-	 * Estado desconhecido - antes da primeira telemetria - so pode produzir
-	 * o comando que nao liga nada. CLEAR_FAULT aqui e o inverso de falhar
-	 * seguro: e a acao que REARMA o forno, feita por padrao sobre um estado
-	 * que ninguem leu ainda. START tambem nao serve: se o forno estiver
-	 * ocioso, ele comeca uma corrida a partir de uma tela que ainda nao
-	 * mostrou nada.
+	 * State not known yet - before the first telemetry frame - may only
+	 * produce the command that cannot energise anything. CLEAR_FAULT here
+	 * is the opposite of failing safe: it is the action that REARMS the
+	 * oven, taken by default over a state nobody has read. START is no
+	 * better: if the oven is idle, it begins a run from a panel that has
+	 * not shown anything yet.
 	 *
-	 * STOP e o unico que nao pode energizar. No pior caso e no-op.
+	 * STOP is the only one that cannot turn the element on. At worst it is
+	 * a no-op.
 	 *
-	 * A janela dura ate a primeira publicacao - CONFIG_REFLOW_PUBLISH_PERIOD_MS,
-	 * 500 ms por padrao - e o preco dela e que uma pressao nesse instante nao
-	 * inicia a corrida. O operador pressiona de novo.
+	 * The window lasts until the first publish -
+	 * CONFIG_REFLOW_PUBLISH_PERIOD_MS, 500 ms by default - and its price is
+	 * that a press in that instant does not start the run. The operator
+	 * presses again.
 	 */
 	if (!state_known) {
 		return REFLOW_CMD_STOP;
@@ -36,50 +38,64 @@ int reflow_button_decide(bool state_known, uint8_t state, bool long_press)
 	switch (state) {
 	case REFLOW_STATE_RUNNING:
 		/*
-		 * O defeito do titulo. Com a corrida em curso, QUALQUER pressao
-		 * e um pedido de parada: e o que o operador quer, e e o unico
-		 * comando cuja recusa nao deixa a resistencia ligada.
+		 * The defect in the title. With a run in progress ANY press is
+		 * a request to stop: it is what the operator wants, and it is
+		 * the only command whose refusal cannot leave the element on.
 		 */
 		return REFLOW_CMD_STOP;
 
 	case REFLOW_STATE_FAULT:
 		if (long_press) {
-			/* O unico uso legitimo da pressao longa, e o de hoje. */
+			/* The only legitimate use of a long press, and today's. */
 			return REFLOW_CMD_CLEAR_FAULT;
 		}
 		/*
-		 * Pressao curta em FAULT continua postando START, e isso e
-		 * DELIBERADO (RFO-B13). Nao porque START seja util ali - o
-		 * handle_cmd o recusa -, mas porque ele e o unico comando que a
-		 * recusa EXPLICA: "start refused: clear the fault first"
-		 * (controller.c). STOP fora de RUNNING e no-op silencioso, entao
-		 * troca-lo por STOP apagaria a unica linha que diz ao operador o
-		 * que fazer em seguida.
+		 * A short press in FAULT still posts START, and that is
+		 * DELIBERATE (RFO-B13). Not because START is useful there -
+		 * handle_cmd() refuses it - but because it is the only command
+		 * whose refusal is EXPLAINED: "start refused: clear the fault
+		 * first" (controller.c). STOP outside RUNNING is a silent
+		 * no-op, so swapping it for STOP would erase the one line that
+		 * tells the operator what to do next.
 		 *
-		 * Consertar o silencio do handle_cmd para comando invalido e
-		 * defeito de verdade e da mesma familia, mas e do nucleo e tem
-		 * alcance maior que este botao - fora de escopo aqui por decisao
-		 * do ticket.
+		 * Fixing handle_cmd()'s silence for a discarded command is a
+		 * real defect of the same family, but it belongs to the core
+		 * and reaches further than this button - out of scope here by
+		 * the ticket's own decision.
 		 */
 		return REFLOW_CMD_START;
 
 	case REFLOW_STATE_IDLE:
 	case REFLOW_STATE_DONE:
-	default:
 		/*
-		 * Ocioso ou terminado: a pressao longa faz o MESMO que a curta,
-		 * e comeca. Entre isto e nao postar nada, escolhi comecar porque
-		 * "nao postar nada" reproduz exatamente o defeito que este ticket
-		 * existe para remover - o operador age e nada acontece, sem
-		 * retorno nenhum.
+		 * Idle or finished: a long press does the SAME as a short one,
+		 * and starts. Between this and posting nothing, starting won,
+		 * because posting nothing reproduces exactly the defect this
+		 * ticket exists to remove - the operator acts and nothing
+		 * happens, with no feedback at all.
 		 *
-		 * O risco residual, dito em voz alta: o botao ja inicia a corrida
-		 * com uma pressao curta, entao "botao pressionado com o forno
-		 * parado inicia" ja e o contrato; o que muda e a pressao longa
-		 * deixar de ser uma excecao surpresa. Um botao presso por
-		 * acidente inicia uma corrida - e isso vale para a pressao curta
-		 * desde sempre, e nao e introduzido aqui.
+		 * The residual risk, said out loud: a button pressed by
+		 * accident starts a run. That already holds for a short press,
+		 * so it is not introduced here - what changes is the long press
+		 * no longer being a surprising exception.
 		 */
 		return REFLOW_CMD_START;
+
+	default:
+		/*
+		 * A state this table does not know. Separate from IDLE/DONE on
+		 * purpose (RFO-B13 review): folded in with them, an unknown
+		 * value answered START - the command that energises - while the
+		 * !state_known branch above answers STOP for the very same
+		 * ignorance. Same not-knowing, opposite decisions.
+		 *
+		 * Unreachable while the enum has four values and controller.c
+		 * is the only publisher. It stops being unreachable the day the
+		 * enum GROWS: a PREHEAT, a COOLING, added by someone who will
+		 * not remember there is a button table in src/ui/. On that day
+		 * this returns the command that cannot turn the element on,
+		 * instead of the one that can.
+		 */
+		return REFLOW_CMD_STOP;
 	}
 }

@@ -24,14 +24,14 @@ static uint8_t selected;
 static int64_t press_started;
 
 /*
- * Ultimo estado visto na telemetria, ou ESTADO_DESCONHECIDO antes da
- * primeira publicacao. Um atomic so, e nao um par (conhecido, estado),
- * porque os dois sao lidos juntos numa decisao: em dois objetos poderiam ser
- * lidos em instantes diferentes, e a combinacao invalida seria justamente
- * 'conhecido' com estado velho.
+ * Last state seen on the telemetry channel, or STATE_UNKNOWN before the
+ * first publish. One atomic and not a (known, state) pair, because both are
+ * read together in one decision: in two objects they could be read at
+ * different instants, and the invalid combination would be exactly 'known'
+ * carrying a stale state.
  */
-#define ESTADO_DESCONHECIDO (-1)
-static atomic_t last_state = ATOMIC_INIT(ESTADO_DESCONHECIDO);
+#define STATE_UNKNOWN (-1)
+static atomic_t last_state = ATOMIC_INIT(STATE_UNKNOWN);
 
 static void post(uint8_t id, int32_t arg)
 {
@@ -71,15 +71,15 @@ static void on_button(bool pressed)
 	}
 
 	/*
-	 * A decisao inteira vive em reflow_button_decide(), pura e testada em
-	 * tests/logic/ (RFO-B13). Aqui fica so o que precisa do kernel: medir a
-	 * pressao e ler o estado. Uma leitura atomica so, para a decisao nao ver
-	 * um estado que mudou no meio dela.
+	 * The whole decision lives in reflow_button_decide(), pure and tested in
+	 * tests/logic/ (RFO-B13). What stays here is only what needs the kernel:
+	 * timing the press and reading the state. A single atomic read, so the
+	 * decision cannot see a state that changed halfway through it.
 	 */
-	atomic_val_t estado = atomic_get(&last_state);
-	bool longa = (k_uptime_get() - press_started) >= LONG_PRESS_MS;
-	int cmd = reflow_button_decide(estado != ESTADO_DESCONHECIDO,
-				       (uint8_t)estado, longa);
+	atomic_val_t state = atomic_get(&last_state);
+	bool long_press = (k_uptime_get() - press_started) >= LONG_PRESS_MS;
+	int cmd = reflow_button_decide(state != STATE_UNKNOWN,
+				       (uint8_t)state, long_press);
 
 	if (cmd != REFLOW_BUTTON_NONE) {
 		post((uint8_t)cmd, 0);

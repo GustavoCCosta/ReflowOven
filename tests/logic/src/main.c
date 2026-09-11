@@ -1933,4 +1933,43 @@ ZTEST(reflow_buttonmap, test_antes_da_primeira_telemetria_nunca_rearma)
 	}
 }
 
+/*
+ * RFO-B13, achado do Q.A. na review do #144: o `default:` do switch estava
+ * dobrado com IDLE/DONE, entao qualquer estado fora dos quatro devolvia START
+ * - o comando que ENERGIZA - enquanto o ramo de estado nao-conhecido devolve
+ * STOP pela mesma ignorancia. Mesmo desconhecimento, decisoes opostas.
+ *
+ * Nao e alcancavel enquanto o enum tem quatro valores e o controller.c e o
+ * unico publicador. Deixa de ser no dia em que o enum CRESCER, e quem
+ * acrescentar um PREHEAT nao vai lembrar que existe uma tabela de botao em
+ * src/ui/. A varredura de valores fora da faixa so existia com
+ * state_known=false, entao nada pegava isto.
+ */
+ZTEST(reflow_buttonmap, test_estado_fora_da_faixa_nao_energiza)
+{
+	/* 4..15: alem dos quatro REFLOW_STATE_* que existem hoje. */
+	for (uint8_t estado = REFLOW_STATE_FAULT + 1; estado < 16; estado++) {
+		for (int longa = 0; longa <= 1; longa++) {
+			int r = reflow_button_decide(true, estado, longa != 0);
+
+			zassert_not_equal(r, REFLOW_CMD_START,
+					  "estado=%u (fora da faixa), longa=%d postou "
+					  "START: um estado que a tabela nao reconhece "
+					  "respondeu com o comando que energiza, "
+					  "enquanto o mesmo desconhecimento no ramo de "
+					  "state_known=false responde STOP",
+					  estado, longa);
+
+			zassert_not_equal(r, REFLOW_CMD_CLEAR_FAULT,
+					  "estado=%u (fora da faixa), longa=%d postou "
+					  "CLEAR_FAULT: rearmar o forno a partir de um "
+					  "estado desconhecido", estado, longa);
+
+			zassert_equal(r, REFLOW_CMD_STOP,
+				      "estado fora da faixa deveria falhar seguro em "
+				      "STOP; veio %s", nome_cmd(r));
+		}
+	}
+}
+
 ZTEST_SUITE(reflow_buttonmap, NULL, NULL, NULL, NULL, NULL);

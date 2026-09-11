@@ -1,15 +1,15 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * O que o botao do encoder manda, dado o estado do forno e a duracao da
- * pressao. Pura, sem Zephyr, testada em tests/logic/ - e esta no formato que o
- * CLAUDE.md reserva para "logica que decide se a resistencia liga", ao lado de
- * net/cmdparse.c e net/httpgate.c.
+ * What the encoder's button commands, given the oven state and how long the
+ * press lasted. Pure, no Zephyr, tested in tests/logic/ - the shape CLAUDE.md
+ * reserves for "logic that decides whether the element comes on", next to
+ * net/cmdparse.c and net/httpgate.c.
  *
- * Por que separada do input_ui.c (RFO-B13): a decisao e o caminho de parada do
- * operador quando nao ha rede. Dentro de um callback do subsistema de input ela
- * so seria exercitavel com imagem, driver e eventos; aqui e uma tabela que o
- * teste percorre inteira.
+ * Why it is separate from input_ui.c (RFO-B13): this decision is the operator's
+ * stop path when there is no network. Inside an input-subsystem callback it
+ * would only be exercisable with an image, a driver and events; here it is a
+ * table a test walks end to end.
  */
 
 #ifndef REFLOW_BUTTONMAP_H_
@@ -18,15 +18,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Nenhum comando a postar. Distinto de qualquer REFLOW_CMD_*, que sao >= 0. */
+/* No command to post. Distinct from every REFLOW_CMD_*, which are >= 0. */
 #define REFLOW_BUTTON_NONE (-1)
 
 /*
- * `state` e um REFLOW_STATE_*, valido somente quando `state_known`. Antes da
- * primeira telemetria o estado do forno e desconhecido, e essa e a distincao
- * que decide seguranca - ver o comentario no .c.
+ * `state` is a REFLOW_STATE_*, valid only when `state_known`. Before the first
+ * telemetry frame the oven state is unknown, and that distinction is what
+ * decides safety - see the comment in the .c.
  *
- * Devolve um REFLOW_CMD_* ou REFLOW_BUTTON_NONE.
+ * Returns a REFLOW_CMD_* or REFLOW_BUTTON_NONE.
  */
 int reflow_button_decide(bool state_known, uint8_t state, bool long_press);
 
