@@ -434,35 +434,35 @@ configdefault NET_PKT_RX_COUNT
 configdefault NET_PKT_TX_COUNT
 	default 16 if REFLOW_NET
 
-# RFO-B47. O par NET_BUF_* volta a ser dimensionado aqui, e o valor e 36 -
-# que NAO e numero novo: e exatamente o que todo build deste projeto teve ate
-# o upstream mudar, e o que as medicoes do RFO-G32 (#128) registraram.
+# RFO-B47. The NET_BUF_* pair is sized here again, and the value is 36 - which
+# is NOT a new number: it is exactly what every build of this project had until
+# upstream changed, and what the RFO-G32 (#128) measurements recorded.
 #
-# O RFO-G32 tinha removido estes dois com um argumento bom e explicitamente
-# condicionado: o upstream dava 36, e um configdefault so conseguiria ABAIXAR
-# para os 32 do piso. Em 2026-08-23 o upstream trocou a condicao (commit
-# a3105999560, 'net: ip: limit larger ethernet defaults'):
+# RFO-G32 had removed these two with a good argument, and an explicitly
+# conditional one: upstream gave 36, and a configdefault could only LOWER that
+# to the floor of 32. On 2026-08-23 upstream changed the condition (commit
+# a3105999560, "net: ip: limit larger ethernet defaults"):
 #
 #     -default 36 if NET_L2_ETHERNET
 #     +default 36 if NET_PKT_LARGE_DEFAULTS
 #      default 16
 #
-# e NET_PKT_LARGE_DEFAULTS e `default y` para ETH_DRIVER, NET_SLIP_TAP e
-# WIFI-nao-scan. O link USB ECM liga NET_L2_ETHERNET sem ser nenhum dos tres,
-# entao o alvo principal do projeto passou a receber 16 - abaixo do piso de 32
-# que a UI web precisa - e o BUILD_ASSERT do httpd.c parou o build, que e
-# exatamente o que ele existe para fazer. Os alvos Wi-Fi nao foram atingidos
-# porque WIFI ainda liga LARGE_DEFAULTS.
+# and NET_PKT_LARGE_DEFAULTS is `default y` for ETH_DRIVER, NET_SLIP_TAP and
+# WIFI-not-scan-only. The USB ECM link selects NET_L2_ETHERNET without being any
+# of the three, so this project's main target started receiving 16 - below the
+# floor of 32 the web UI needs - and the BUILD_ASSERT in httpd.c stopped the
+# build, which is exactly what it exists to do. The Wi-Fi targets were not hit,
+# because WIFI still turns LARGE_DEFAULTS on.
 #
-# Escolhi 36 e nao 32: com 32 este arquivo passaria a ABAIXAR o valor em toda
-# arvore que ainda de 36, que e a mudanca que o #128 recusou com razao. Com 36
-# ninguem perde buffer em arvore nenhuma, e o piso de 32 do BUILD_ASSERT fica
-# intocado - ele continua sendo quem reprova o build se este numero cair.
+# 36 and not 32: with 32 this file would start LOWERING the value on every tree
+# that still gives 36, which is the change #128 refused, rightly. With 36 nobody
+# loses a buffer on any tree, and the BUILD_ASSERT's floor of 32 is untouched -
+# it remains the thing that fails the build if this number ever drops.
 #
-# O que se perde, dito em voz alta: se o upstream um dia der MAIS que 36, este
-# configdefault passa a limitar em 36. Kconfig nao tem max(), entao piso de
-# verdade so com simbolo proprio e derivacao - mais verboso, e a folga que ele
-# compraria e sobre um numero que ninguem mediu precisar.
+# What is lost, said out loud: if upstream one day gives MORE than 36, this
+# configdefault caps it at 36, and nothing warns. Kconfig has no max(), so a
+# real floor needs a symbol of our own plus a derivation - more verbose, and the
+# headroom it would buy is over a number nobody has measured needing.
 configdefault NET_BUF_RX_COUNT
 	default 36 if REFLOW_NET
 
