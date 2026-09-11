@@ -14,6 +14,7 @@
 #include "pid.h"
 #include "profile.h"
 #include "net/cmdparse.h"
+#include "ui/buttonmap.h"
 #include "net/httpgate.h"
 #include "net/profiles_json.h"
 #include "net/sendbudget.h"
@@ -1830,3 +1831,145 @@ ZTEST(reflow_sendbudget, test_os_dois_prazos_concordam_no_limite)
 }
 
 ZTEST_SUITE(reflow_sendbudget, NULL, NULL, NULL, NULL, NULL);
+
+/*
+ * RFO-B13: o que o botao do encoder manda.
+ *
+ * A pressao longa era CLEAR_FAULT incondicional. Com a corrida em curso o
+ * handle_cmd() descarta CLEAR_FAULT sem log e sem mudar a UI, entao o
+ * operador que segurava o botao para PARAR via o forno continuar aquecendo -
+ * e nada lhe dizia que nao foi obedecido. A tabela inteira esta aqui porque
+ * o defeito nao era um ramo errado, era a ausencia do estado na decisao.
+ */
+static const char *nome_cmd(int c)
+{
+	switch (c) {
+	case REFLOW_CMD_START:          return "START";
+	case REFLOW_CMD_STOP:           return "STOP";
+	case REFLOW_CMD_SELECT_PROFILE: return "SELECT_PROFILE";
+	case REFLOW_CMD_CLEAR_FAULT:    return "CLEAR_FAULT";
+	case REFLOW_BUTTON_NONE:        return "(nenhum)";
+	default:                        return "(desconhecido)";
+	}
+}
+
+#define ZASSERT_BOTAO(conhecido, estado, longa, esperado, porque)                 \
+	do {                                                                      \
+		int _r = reflow_button_decide((conhecido), (estado), (longa));     \
+		zassert_equal(_r, (esperado),                                      \
+			      "%s: esperava %s, veio %s", (porque),                \
+			      nome_cmd(esperado), nome_cmd(_r));                   \
+	} while (0)
+
+ZTEST(reflow_buttonmap, test_corrida_em_curso_qualquer_pressao_para)
+{
+	ZASSERT_BOTAO(true, REFLOW_STATE_RUNNING, true, REFLOW_CMD_STOP,
+		      "RUNNING + pressao LONGA (o defeito do RFO-B13: postava "
+		      "CLEAR_FAULT, que o handle_cmd descarta em silencio "
+		      "enquanto a resistencia continua ligada)");
+
+	ZASSERT_BOTAO(true, REFLOW_STATE_RUNNING, false, REFLOW_CMD_STOP,
+		      "RUNNING + pressao curta (sem regressao)");
+}
+
+ZTEST(reflow_buttonmap, test_falta_latchada)
+{
+	ZASSERT_BOTAO(true, REFLOW_STATE_FAULT, true, REFLOW_CMD_CLEAR_FAULT,
+		      "FAULT + longa: o unico uso legitimo da pressao longa");
+
+	/*
+	 * Deliberado, e explicado no buttonmap.c: START e o unico comando cuja
+	 * recusa o controller EXPLICA (\"start refused: clear the fault first\"),
+	 * enquanto STOP fora de RUNNING e no-op silencioso.
+	 */
+	ZASSERT_BOTAO(true, REFLOW_STATE_FAULT, false, REFLOW_CMD_START,
+		      "FAULT + curta: mantido em START de proposito");
+}
+
+ZTEST(reflow_buttonmap, test_ocioso_e_terminado_comecam)
+{
+	ZASSERT_BOTAO(true, REFLOW_STATE_IDLE, false, REFLOW_CMD_START,
+		      "IDLE + curta");
+	ZASSERT_BOTAO(true, REFLOW_STATE_IDLE, true, REFLOW_CMD_START,
+		      "IDLE + longa: a segunda metade do defeito relatado - "
+		      "postava CLEAR_FAULT, que era descartado");
+
+	ZASSERT_BOTAO(true, REFLOW_STATE_DONE, false, REFLOW_CMD_START,
+		      "DONE + curta");
+	ZASSERT_BOTAO(true, REFLOW_STATE_DONE, true, REFLOW_CMD_START,
+		      "DONE + longa");
+}
+
+/*
+ * O item nao negociavel do criterio de aceite: antes da primeira telemetria
+ * nenhuma pressao pode limpar falta. Limpar falta REARMA o forno, e faze-lo
+ * por padrao sobre um estado que ninguem leu e o inverso de falhar seguro.
+ */
+ZTEST(reflow_buttonmap, test_antes_da_primeira_telemetria_nunca_rearma)
+{
+	for (int longa = 0; longa <= 1; longa++) {
+		/* O estado passado e lixo de proposito: nao pode ser lido. */
+		for (uint8_t estado = 0; estado < 8; estado++) {
+			int r = reflow_button_decide(false, estado, longa != 0);
+
+			zassert_not_equal(r, REFLOW_CMD_CLEAR_FAULT,
+					  "estado desconhecido (estado=%u, longa=%d) "
+					  "postou CLEAR_FAULT: rearmar o forno por "
+					  "padrao antes de saber em que estado ele "
+					  "esta e o inverso de falhar seguro",
+					  estado, longa);
+
+			zassert_not_equal(r, REFLOW_CMD_START,
+					  "estado desconhecido (estado=%u, longa=%d) "
+					  "postou START: comecaria uma corrida a "
+					  "partir de um estado que ninguem leu",
+					  estado, longa);
+
+			zassert_equal(r, REFLOW_CMD_STOP,
+				      "estado desconhecido deveria postar STOP, o "
+				      "unico comando que nao pode energizar; veio %s",
+				      nome_cmd(r));
+		}
+	}
+}
+
+/*
+ * RFO-B13, achado do Q.A. na review do #144: o `default:` do switch estava
+ * dobrado com IDLE/DONE, entao qualquer estado fora dos quatro devolvia START
+ * - o comando que ENERGIZA - enquanto o ramo de estado nao-conhecido devolve
+ * STOP pela mesma ignorancia. Mesmo desconhecimento, decisoes opostas.
+ *
+ * Nao e alcancavel enquanto o enum tem quatro valores e o controller.c e o
+ * unico publicador. Deixa de ser no dia em que o enum CRESCER, e quem
+ * acrescentar um PREHEAT nao vai lembrar que existe uma tabela de botao em
+ * src/ui/. A varredura de valores fora da faixa so existia com
+ * state_known=false, entao nada pegava isto.
+ */
+ZTEST(reflow_buttonmap, test_estado_fora_da_faixa_nao_energiza)
+{
+	/* 4..15: alem dos quatro REFLOW_STATE_* que existem hoje. */
+	for (uint8_t estado = REFLOW_STATE_FAULT + 1; estado < 16; estado++) {
+		for (int longa = 0; longa <= 1; longa++) {
+			int r = reflow_button_decide(true, estado, longa != 0);
+
+			zassert_not_equal(r, REFLOW_CMD_START,
+					  "estado=%u (fora da faixa), longa=%d postou "
+					  "START: um estado que a tabela nao reconhece "
+					  "respondeu com o comando que energiza, "
+					  "enquanto o mesmo desconhecimento no ramo de "
+					  "state_known=false responde STOP",
+					  estado, longa);
+
+			zassert_not_equal(r, REFLOW_CMD_CLEAR_FAULT,
+					  "estado=%u (fora da faixa), longa=%d postou "
+					  "CLEAR_FAULT: rearmar o forno a partir de um "
+					  "estado desconhecido", estado, longa);
+
+			zassert_equal(r, REFLOW_CMD_STOP,
+				      "estado fora da faixa deveria falhar seguro em "
+				      "STOP; veio %s", nome_cmd(r));
+		}
+	}
+}
+
+ZTEST_SUITE(reflow_buttonmap, NULL, NULL, NULL, NULL, NULL);
