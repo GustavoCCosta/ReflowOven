@@ -14,6 +14,7 @@
 #include <zephyr/version.h>
 
 #include "../core/app.h"
+#include "buttonmap.h"
 
 LOG_MODULE_REGISTER(reflow_input, CONFIG_REFLOW_LOG_LEVEL);
 
@@ -21,7 +22,16 @@ LOG_MODULE_REGISTER(reflow_input, CONFIG_REFLOW_LOG_LEVEL);
 
 static uint8_t selected;
 static int64_t press_started;
-static atomic_t running;
+
+/*
+ * Ultimo estado visto na telemetria, ou ESTADO_DESCONHECIDO antes da
+ * primeira publicacao. Um atomic so, e nao um par (conhecido, estado),
+ * porque os dois sao lidos juntos numa decisao: em dois objetos poderiam ser
+ * lidos em instantes diferentes, e a combinacao invalida seria justamente
+ * 'conhecido' com estado velho.
+ */
+#define ESTADO_DESCONHECIDO (-1)
+static atomic_t last_state = ATOMIC_INIT(ESTADO_DESCONHECIDO);
 
 static void post(uint8_t id, int32_t arg)
 {
@@ -37,7 +47,7 @@ static void on_rotate(int32_t steps)
 	uint8_t count = reflow_profile_count();
 	int32_t next;
 
-	if (count == 0U || atomic_get(&running)) {
+	if (count == 0U || atomic_get(&last_state) == REFLOW_STATE_RUNNING) {
 		return;
 	}
 
@@ -60,12 +70,19 @@ static void on_button(bool pressed)
 		return;
 	}
 
-	if (k_uptime_get() - press_started >= LONG_PRESS_MS) {
-		post(REFLOW_CMD_CLEAR_FAULT, 0);
-	} else if (atomic_get(&running)) {
-		post(REFLOW_CMD_STOP, 0);
-	} else {
-		post(REFLOW_CMD_START, 0);
+	/*
+	 * A decisao inteira vive em reflow_button_decide(), pura e testada em
+	 * tests/logic/ (RFO-B13). Aqui fica so o que precisa do kernel: medir a
+	 * pressao e ler o estado. Uma leitura atomica so, para a decisao nao ver
+	 * um estado que mudou no meio dela.
+	 */
+	atomic_val_t estado = atomic_get(&last_state);
+	bool longa = (k_uptime_get() - press_started) >= LONG_PRESS_MS;
+	int cmd = reflow_button_decide(estado != ESTADO_DESCONHECIDO,
+				       (uint8_t)estado, longa);
+
+	if (cmd != REFLOW_BUTTON_NONE) {
+		post((uint8_t)cmd, 0);
 	}
 	press_started = 0;
 }
@@ -100,12 +117,13 @@ INPUT_CALLBACK_DEFINE(NULL, input_cb, NULL);
 INPUT_CALLBACK_DEFINE(NULL, input_cb);
 #endif
 
-/* Track the run state so the button can act as start/stop. */
+/* Track the oven state: the button's decision needs it, and needs to know
+ * whether it has ever been seen (RFO-B13). */
 static void telemetry_cb(const struct zbus_channel *chan)
 {
 	const struct reflow_telemetry *t = zbus_chan_const_msg(chan);
 
-	atomic_set(&running, t->state == REFLOW_STATE_RUNNING ? 1 : 0);
+	atomic_set(&last_state, (atomic_val_t)t->state);
 	selected = t->profile_idx;
 }
 
