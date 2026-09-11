@@ -95,11 +95,76 @@ function makeDom() {
 	};
 }
 
+/*
+ * A porta Web Serial stubada (RFO-T49). O harness ja fingia `navigator.serial`
+ * o bastante para a pagina escolher o transporte; o que faltava era poder ABRIR
+ * e FECHAR uma sessao, e alimentar bytes no leitor.
+ *
+ * A propriedade que isso existe para medir e de ORDEM: o laco de leitura chama
+ * `usbClose()` DEPOIS de sair do `while`, entao nenhum quadro em buffer chega
+ * depois para apagar o `desconectado`. Ordem e o que muda sem ninguem notar -
+ * um `await` movido, um `usbClose()` antecipado - e ai a mensagem que diz ao
+ * operador que ele perdeu o cabo passa a ser apagada pelo ultimo quadro.
+ *
+ * Por isso o leitor e uma fila que o teste controla: da para enfileirar um
+ * quadro de telemetria E o fim da porta, e ver quem ganha.
+ */
+function makeSerial(opts) {
+	const fila = [];
+	let resolveEspera = null;
+
+	const leitor = {
+		read() {
+			if (fila.length) {
+				return Promise.resolve(fila.shift());
+			}
+			/* Sem nada na fila: fica pendente ate o teste empurrar. */
+			return new Promise((r) => { resolveEspera = r; });
+		},
+		releaseLock() {},
+	};
+
+	const empurra = (item) => {
+		if (resolveEspera) {
+			const r = resolveEspera;
+			resolveEspera = null;
+			r(item);
+		} else {
+			fila.push(item);
+		}
+	};
+
+	const porta = {
+		open: () => (opts.usbOpenRejects
+			? Promise.reject(new Error('acesso negado'))
+			: Promise.resolve()),
+		writable: { getWriter: () => ({ write() {} }) },
+		readable: { getReader: () => leitor },
+		/* API do teste, nao da pagina. */
+		feed: (texto) => empurra({
+			done: false,
+			value: new TextEncoder().encode(texto),
+		}),
+		finish: () => empurra({ done: true }),
+	};
+
+	return {
+		addEventListener() {},
+		requestPort: () => (opts.usbPortRejects
+			? Promise.reject(new Error('nenhuma porta escolhida'))
+			: Promise.resolve(porta)),
+		/* O teste alcanca a porta por aqui. */
+		port: porta,
+	};
+}
+
 function run(locationObj, opts = {}) {
 	const { document, els } = makeDom();
 	const sandbox = {
 		document, location: locationObj, console,
-		navigator: opts.serial ? { serial: { addEventListener() {} } } : {},
+		navigator: opts.serial
+			? { serial: makeSerial(opts) }
+			: {},
 		/*
 		 * A fetch that never settles is enough to check which transport the
 		 * page picks, but it cannot exercise what the page does with an
@@ -139,7 +204,7 @@ function run(locationObj, opts = {}) {
 	};
 	vm.createContext(sandbox);
 	vm.runInContext(js, sandbox);
-	return { sandbox, els };
+	return { sandbox, els, serial: sandbox.navigator.serial };
 }
 
 const sample = {
@@ -369,6 +434,73 @@ check('profile listing recognised', profiles === 1, `profiles=${profiles}`);
 	keep.sandbox.lastEs.onerror();
 	check('a lost link does not wipe the refusal either',
 	      /token/i.test(shown(keep)), shown(keep));
+
+	/*
+	 * RFO-T49: o caminho Web Serial, que o RFO-B42 classificou e nenhum teste
+	 * exercitava. Quatro mensagens de transporte vivem so aqui.
+	 */
+	console.log('the Web Serial transport messages');
+
+	const usbFile = { protocol: 'file:', hostname: '' };
+
+	/* Antes de qualquer acao: a dica de carga inicial esta na tela. */
+	const dica = run(usbFile, { serial: true });
+	check('the load hint is up before any action',
+	      /Conectar por USB/.test(shown(dica)), shown(dica));
+
+	/* requestPort recusado -> 'nao conectou', e a dica some. */
+	const recusa = run(usbFile, { serial: true, usbPortRejects: true });
+	await recusa.sandbox.usbConnect();
+	await settle();
+	check('a refused port says so',
+	      /nao conectou/.test(shown(recusa)), shown(recusa));
+	check('and the load hint is gone once the operator acted',
+	      !/Conectar por USB/.test(shown(recusa)), shown(recusa));
+
+	/* open() recusado -> mesma mensagem, outro ponto de falha. */
+	const semAbrir = run(usbFile, { serial: true, usbOpenRejects: true });
+	await semAbrir.sandbox.usbConnect();
+	await settle();
+	check('a port that refuses to open says so',
+	      /nao conectou/.test(shown(semAbrir)), shown(semAbrir));
+
+	/* Conexao boa: anuncia, e telemetria limpa o anuncio (classe transporte). */
+	const usb = run(usbFile, { serial: true });
+	await usb.sandbox.usbConnect();
+	await settle();
+	check('a connected port announces itself',
+	      /conectado pela porta USB/.test(shown(usb)), shown(usb));
+
+	usb.sandbox.update(sample);
+	check('telemetry clears the connected announcement',
+	      !/conectado pela porta USB/.test(shown(usb)), shown(usb));
+
+	/*
+	 * O item central. Enfileira um quadro de telemetria E o fim da porta, nessa
+	 * ordem, e ve quem ganha.
+	 *
+	 * Com a ordem de hoje - laco processa, sai, e SO ENTAO usbClose() - o quadro
+	 * e consumido antes e o 'desconectado' fica. Com o usbClose() antecipado, o
+	 * quadro em buffer chega depois e apaga a mensagem que diz ao operador que
+	 * ele perdeu o cabo. Injetar o quadro e o que separa os dois casos: so
+	 * fechar a porta e olhar a tela mediria o caso facil.
+	 */
+	const queda = run(usbFile, { serial: true });
+	await queda.sandbox.usbConnect();
+	await settle();
+
+	queda.serial.port.feed(JSON.stringify(sample) + '\n');
+	queda.serial.port.finish();
+	for (let i = 0; i < 6; i++) {
+		await settle();
+	}
+
+	check('a frame buffered before the close still renders',
+	      /183\.3/.test(queda.els.temp.innerHTML), queda.els.temp.innerHTML);
+	check('and the disconnect notice survives it',
+	      /desconectado/.test(shown(queda)), shown(queda));
+	check('the USB button comes back after a disconnect',
+	      queda.els.usb.style.display === '', queda.els.usb.style.display);
 })().then(() => {
 	console.log(failures ? `\nFAILED (${failures})` : '\nall page checks passed');
 	process.exit(failures ? 1 : 0);
