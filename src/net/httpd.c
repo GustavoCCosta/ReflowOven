@@ -149,6 +149,27 @@ BUILD_ASSERT(CONFIG_NET_BUF_RX_COUNT >= 32 && CONFIG_NET_BUF_TX_COUNT >= 32,
 	     "the web UI is sized for at least 32 network buffers per direction "
 	     "(RFO-G32)");
 
+/*
+ * RFO-B46. send_all() below is written on the promise that zsock_send() hands
+ * control back after a slice, and that promise is setsockopt(SO_SNDTIMEO) - a
+ * call that sockets_inet.c wraps entirely in
+ * IS_ENABLED(CONFIG_NET_CONTEXT_SNDTIMEO) and, without it, answers ENOTSUP.
+ * Upstream declares the symbol as a plain bool with no `default y`, so the call
+ * failed on every target this project ever built, and the only sign was a
+ * warning once per accepted connection.
+ *
+ * This is the one of these assertions that guards a promise rather than a size,
+ * and it is here because the failure is silent in the worst way: the server
+ * keeps working until a client stops reading, and then the thread parks inside
+ * send() with the remote Stop button behind it (RFO-B07). No test catches it -
+ * tests/httpwait passes with the symbol off, warning and all.
+ */
+BUILD_ASSERT(IS_ENABLED(CONFIG_NET_CONTEXT_SNDTIMEO),
+	     "CONFIG_NET_CONTEXT_SNDTIMEO must be on, or setsockopt(SO_SNDTIMEO) "
+	     "answers ENOTSUP and one client that stops reading parks the server "
+	     "thread for ever - the RFO-B07 defect with nothing to stop it "
+	     "(RFO-B46)");
+
 #define IDLE_BUDGET_MS CONFIG_REFLOW_NET_IDLE_BUDGET_MS
 #define JSON_BUF_SZ REFLOW_JSON_BUF_SZ
 
@@ -202,6 +223,14 @@ static int build_state_json(char *buf, size_t len)
  * after a slice instead of blocking for ever. Whether that means "slow" or
  * "gone" is not a socket question, and it is not answered here: the budget in
  * sendbudget.c decides, from the time since the last byte actually moved.
+ *
+ * That first sentence holds only because the app switches
+ * CONFIG_NET_CONTEXT_SNDTIMEO on, in the block before `source "Kconfig.zephyr"`
+ * - and it was FALSE for as long as it did not (RFO-B46). The dependency is
+ * load-bearing and not incidental: with the symbol off, setsockopt() answers
+ * ENOTSUP, send() can block for ever, and the budget never gets to decide
+ * because it only runs BETWEEN calls. The BUILD_ASSERT near the top of this
+ * file is what makes such a build stop instead of ship.
  */
 static int send_all(int fd, const char *data, size_t len)
 {
