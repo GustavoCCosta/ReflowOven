@@ -403,10 +403,23 @@ configdefault ZVFS_POLL_MAX
 # ever built, the httpd.c warning fired once per accepted connection, and the
 # comment above send_all() claimed a guarantee that never held.
 #
-# In THIS block for the same reason as its neighbours (RFO-B15, RFO-G32): a
-# configdefault parsed after the Zephyr tree lands behind the upstream default
-# and never applies. Here that would be silent - the symbol would stay off and
-# the only sign would be a warning in a log nobody reads.
+# In this block for GROUPING, and NOT for the reason its neighbours are here
+# (RFO-G39 corrects RFO-B46 on this point). The RFO-B15 / RFO-G32 mechanism - a
+# configdefault parsed after the Zephyr tree landing behind an unconditional
+# upstream default, and never applying - needs a default in front of it to fall
+# behind. This symbol has none: upstream declares it as a plain bool with no
+# `default` at all, as the paragraph above already says, so its default list is
+# empty and a configdefault wins wherever it is parsed.
+#
+# Measured rather than argued: moved below `source "Kconfig.zephyr"`, the build
+# still comes out with CONFIG_NET_CONTEXT_SNDTIMEO=y.
+#
+# It stays here because it belongs to the same group - what the web UI needs
+# from the network stack - and a reader looking for the app's network sizing
+# should find all of it in one place. That is a filing decision and not a
+# correctness one, and saying which is which matters: this file is where the
+# next person looks up when position DOES decide, and three PRs went into
+# establishing that rule.
 configdefault NET_CONTEXT_SNDTIMEO
 	default y if REFLOW_NET
 
