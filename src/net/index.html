@@ -95,8 +95,20 @@ function update(d){
  if(d.state!='running'&&hist.length>1&&d.setpoint_mc==0&&hist.length>MAXP)hist=[];
  draw();
 }
+/* RFO-B22. Re-applying the known profile after the list is built, and the
+   one line that does it is the whole fix.
+   update() sets sel.value only when d.profile CHANGES - a guard that exists so
+   the page does not fight an operator who is picking a profile. But if the
+   first telemetry frame arrives before /api/profiles resolves, that assignment
+   lands on an empty <select> and is silently dropped, while lastProf keeps the
+   value. From then on d.profile never changes, the guard blocks every later
+   sync, and the selector stays on the first <option> while the oven runs
+   another curve - the operator presses Start believing in the wrong one.
+   So the list arriving is what restores the selection, because the list
+   arriving is what destroyed it. */
 function addProfiles(list){var sel=document.getElementById('prof');sel.innerHTML='';
- list.forEach(function(p,i){var o=document.createElement('option');o.value=i;o.textContent=p;sel.appendChild(o);});}
+ list.forEach(function(p,i){var o=document.createElement('option');o.value=i;o.textContent=p;sel.appendChild(o);});
+ if(lastProf>=0)sel.value=lastProf;}
 /* RFO-B41: mensagens de comando e de transporte tem elemento proprio, que o
    update() nunca toca. Enquanto as duas fontes disputavam o #sub, a que roda em
    laco ganhava sempre: o operador clicava PARAR, o POST era recusado, e o quadro
