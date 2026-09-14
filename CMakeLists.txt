@@ -38,7 +38,8 @@ target_sources_ifdef(CONFIG_REFLOW_NET           app PRIVATE src/net/httpd.c src
                                                             src/net/httpgate.c src/net/l4.c
                                                             src/net/profiles_json.c
                                                             src/net/sendbudget.c)
-target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI     app PRIVATE src/net/wifi.c)
+target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI     app PRIVATE src/net/wifi.c
+                                                             src/net/wifipolicy.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_USB_ECM  app PRIVATE src/net/usb_net.c)
 target_sources_ifdef(CONFIG_REFLOW_LINK_WIFI_AP  app PRIVATE src/net/wifi_ap.c
                                                              src/net/wifi_ap_cfg.c)
