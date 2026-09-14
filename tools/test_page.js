@@ -267,20 +267,51 @@ check('fault is announced', /FAULT: sensor/.test(r.els.sub.textContent),
 check('fault is styled', r.els.sub.className === 'bad', r.els.sub.className);
 
 console.log('picking the JSON line out of shell noise');
+
+/*
+ * RFO-B24. This block used to re-implement indexOf('{') and the profile regex
+ * inside the test and assert on its own copy, so index.html was never
+ * exercised: changing the parser in the page left the suite green while Web
+ * Serial silently stopped updating the temperature.
+ *
+ * Now the page's own handler is called - shellLine(), top level for exactly
+ * this reason - and every assertion is about what it DID: the rendered
+ * temperature, the populated profile list, and the elements it left alone.
+ * Nothing here knows what a JSON line looks like.
+ */
+const shellDom = run({ protocol: 'file:', hostname: '' }, { serial: true });
 const noisy = [
 	'uart:~$ reflow json',
-	'[1;32muart:~$[m {"temp_mc":26250,"temp_valid":true}',
+	'\x1b[1;32muart:~$\x1b[m ' + JSON.stringify(sample),
 	'[0] SAC305 lead-free',
 	'',
 ];
-let parsed = 0, profiles = 0;
-noisy.forEach((ln) => {
-	const i = ln.indexOf('{');
-	if (i >= 0) { JSON.parse(ln.slice(i)); parsed++; return; }
-	if (ln.match(/\[(\d+)\]\s+(.+?)\s*$/)) profiles++;
-});
-check('one JSON line found, prompt and colours ignored', parsed === 1, `parsed=${parsed}`);
-check('profile listing recognised', profiles === 1, `profiles=${profiles}`);
+
+/* Nothing rendered yet, so anything asserted below is this handler's doing. */
+check('the temperature starts empty', shellDom.els.temp.innerHTML === '',
+      JSON.stringify(shellDom.els.temp.innerHTML));
+
+noisy.forEach((ln) => shellDom.sandbox.shellLine(ln));
+
+check('the page parsed the JSON line and rendered it',
+      /183\.3/.test(shellDom.els.temp.innerHTML), shellDom.els.temp.innerHTML);
+check('the prompt, the echo and the VT100 colours did not become a reading',
+      !/undefined|NaN/.test(shellDom.els.temp.innerHTML), shellDom.els.temp.innerHTML);
+check('the page recognised the profile listing',
+      shellDom.sandbox.profs[0] === 'SAC305 lead-free',
+      JSON.stringify(shellDom.sandbox.profs));
+
+/*
+ * And the other direction: a line the parser must NOT act on. The echo of the
+ * command carries the word `reflow` and a `$`, and an empty line carries
+ * nothing - neither may reach update() or the profile list.
+ */
+const quietDom = run({ protocol: 'file:', hostname: '' }, { serial: true });
+['uart:~$ reflow json', '', 'uart:~$'].forEach((ln) => quietDom.sandbox.shellLine(ln));
+check('shell noise alone renders nothing', quietDom.els.temp.innerHTML === '',
+      JSON.stringify(quietDom.els.temp.innerHTML));
+check('shell noise alone lists no profile', quietDom.sandbox.profs.length === 0,
+      JSON.stringify(quietDom.sandbox.profs));
 
 /*
  * RFO-B41: a message about a refused command has to survive the telemetry that
