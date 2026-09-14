@@ -43,8 +43,27 @@ static const struct device *const panel = DEVICE_DT_GET(DT_CHOSEN(zephyr_display
  */
 #define PUBS 6
 
-/* Slack over the 500 ms delay in the display thread's K_THREAD_DEFINE. */
-#define THREAD_SETTLE K_MSEC(900)
+/*
+ * Slack over the 500 ms delay in the display thread's K_THREAD_DEFINE, plus
+ * room for ui_build() to finish. 900 ms was not enough on the CI runner: the
+ * first publish landed while LVGL was still building the screen and cost 30 ms
+ * on the HEALTHY path, which says nothing about this ticket.
+ */
+#define THREAD_SETTLE K_MSEC(2000)
+
+/*
+ * Gap between publishes, and the burst is what was wrong before it existed.
+ * controller.c publishes every CONFIG_REFLOW_PUBLISH_PERIOD_MS - 500 ms by
+ * default - and on state transitions; it never fires six in a row with no
+ * yield. Without a gap the healthy scene measured the test's own scheduling
+ * rather than the defect, because the display thread never got to run between
+ * publishes.
+ *
+ * It does NOT soften the defect scene: with the observer enabled and nobody
+ * calling zbus_sub_wait(), the queue stays full however long the gap is, so
+ * publishes past the fourth still pay the whole timeout.
+ */
+#define PUB_GAP K_MSEC(20)
 
 #if defined(CONFIG_REFLOW_TEST_DENY_PANEL)
 /*
@@ -84,6 +103,10 @@ static void measure(int64_t *worst, int64_t *total)
 		if (dt > *worst) {
 			*worst = dt;
 		}
+
+		/* Outside the measurement on purpose: this is the control loop's
+		 * own cadence, not part of what a publish costs. */
+		k_sleep(PUB_GAP);
 	}
 }
 
