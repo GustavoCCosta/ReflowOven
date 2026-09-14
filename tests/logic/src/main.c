@@ -220,6 +220,28 @@ ZTEST(reflow_profile, test_heater_is_off_while_cooling)
 		      "heater must be forced off while cooling");
 }
 
+/*
+ * RFO-B32 asked for a decision on this one, so here it is, written: it STAYS,
+ * crude cooling and all, and it keeps a purpose the Newtonian tests above do
+ * not cover.
+ *
+ * What it is for: walking the state machine end to end over test_prof, a
+ * SYNTHETIC profile, so the machine stays guarded independently of the built-in
+ * table. The tests above all drive reflow_profile_get(0); if someone retunes a
+ * shipped profile they move those together, and this one does not move with
+ * them.
+ *
+ * What it is NOT: the RFO-B04 guard. Its -1500 mC per tick is 6 degC/s, a slope
+ * no oven has, and that is exactly why it never saw the defect - it reached the
+ * cooling target so fast the budget was never in question.
+ * test_resfriamento_passivo_realista_nao_e_falta and
+ * test_slow_oven_fits_in_the_cooling_budget own that requirement now.
+ *
+ * Converting it to the Newtonian model was the other option the ticket allowed,
+ * and it is rejected on purpose: it would tie the one end-to-end test of the
+ * synthetic profile to the thermal model, so a change to the model would move
+ * every profile test at once and leave nothing standing still to check against.
+ */
 ZTEST(reflow_profile, test_full_run_completes)
 {
 	struct reflow_run run;
@@ -258,53 +280,147 @@ ZTEST(reflow_profile, test_full_run_completes)
  * Usa o perfil embutido de verdade, nao test_prof: o defeito esta nos numeros
  * dos perfis que o firmware entrega.
  */
-#define OVEN_TAU_MS 300000U
-#define AMBIENT_MC  25000
+/*
+ * RFO-B32. The cooling model used to carry a single tau, fixed in a #define at
+ * 300 s, and that hid the case that matters. 100 s is a fast oven, 300 s a
+ * typical one, and 600 s a slow one - and the slow one is the worst case of the
+ * cooling stage's time budget. Passing at 300 says nothing about 600, and 600
+ * is exactly where a profile whose cooling budget is too short goes back to
+ * calling a finished, correctly soldered run a fault (RFO-B04).
+ *
+ * So tau is a scenario parameter, swept below, and the slow oven also gets an
+ * assertion of its own.
+ */
+#define AMBIENT_MC 25000
 
-ZTEST(reflow_profile, test_resfriamento_passivo_realista_nao_e_falta)
+#define TAU_FAST_MS    100000U
+#define TAU_TYPICAL_MS 300000U
+#define TAU_SLOW_MS    600000U
+
+struct cooling_result {
+	enum reflow_run_result res;
+	uint32_t elapsed_ms;   /* whole run */
+	uint32_t cool_ms;      /* time spent in the last stage alone */
+	int32_t temp_mc;       /* where the oven ended up */
+	uint8_t stage;         /* stage the run stopped on */
+};
+
+/*
+ * One run of the built-in profile against a first-order oven whose thermal time
+ * constant is `tau_ms`. While the heater is allowed the oven follows the
+ * setpoint with a short lag; with the heater off it loses a fraction of
+ * (T - ambient) per tick, which is Newton's law and not a fixed slope.
+ */
+static struct cooling_result cooling_run(uint32_t tau_ms)
 {
 	const struct reflow_profile *p = reflow_profile_get(0);
 	const uint32_t dt_ms = 250;
 	struct reflow_run run;
+	struct cooling_result out = { REFLOW_RUN_ACTIVE, 0U, 0U, AMBIENT_MC, 0U };
 	int32_t temp = AMBIENT_MC;
-	enum reflow_run_result res = REFLOW_RUN_ACTIVE;
-	uint32_t elapsed_ms = 0;
 	uint32_t limit_ms;
+
+	zassert_not_null(p, "perfil 0 nao existe");
+
+	limit_ms = reflow_profile_max_ms(p);
+	reflow_run_start(&run, p, temp);
+
+	while (out.res == REFLOW_RUN_ACTIVE && out.elapsed_ms <= limit_ms) {
+		if (reflow_run_heater_allowed(&run, p)) {
+			/* Heated oven: follows the setpoint with a short lag. */
+			temp += (run.setpoint_mc - temp) / 8;
+		} else {
+			/* Passive cooling, first order, heater off. */
+			temp -= (int32_t)(((int64_t)(temp - AMBIENT_MC) * dt_ms) /
+					  tau_ms);
+		}
+
+		/* Time in the last stage, which is the cooling one. */
+		if (run.stage == p->n_stages - 1U) {
+			out.cool_ms += dt_ms;
+		}
+
+		out.stage = run.stage;
+		out.res = reflow_run_tick(&run, p, dt_ms, temp, temp);
+		out.elapsed_ms += dt_ms;
+	}
+
+	out.temp_mc = temp;
+
+	return out;
+}
+
+ZTEST(reflow_profile, test_resfriamento_passivo_realista_nao_e_falta)
+{
+	const struct reflow_profile *p = reflow_profile_get(0);
+	static const uint32_t taus[] = { TAU_FAST_MS, TAU_TYPICAL_MS, TAU_SLOW_MS };
+	size_t i;
 
 	zassert_not_null(p, "perfil 0 nao existe");
 	zassert_equal(p->stages[p->n_stages - 1].kind, REFLOW_STAGE_COOL,
 		      "este teste assume que o perfil termina esfriando");
 
-	limit_ms = reflow_profile_max_ms(p);
-	reflow_run_start(&run, p, temp);
+	/*
+	 * The assertion that goes red without the RFO-B04 patch:
+	 * REFLOW_RUN_ERR_TIMEOUT in the last stage, with the board already
+	 * soldered and the heater off since cooling began. Swept over the three
+	 * ovens, because the run has to finish on all of them.
+	 */
+	for (i = 0; i < ARRAY_SIZE(taus); i++) {
+		struct cooling_result r = cooling_run(taus[i]);
 
-	while (res == REFLOW_RUN_ACTIVE && elapsed_ms <= limit_ms) {
-		if (reflow_run_heater_allowed(&run, p)) {
-			/* Forno aquecido: segue o setpoint com atraso curto. */
-			temp += (run.setpoint_mc - temp) / 8;
-		} else {
-			/* Resfriamento passivo, primeira ordem, sem aquecedor. */
-			temp -= (int32_t)(((int64_t)(temp - AMBIENT_MC) * dt_ms) /
-					  OVEN_TAU_MS);
-		}
-		res = reflow_run_tick(&run, p, dt_ms, temp, temp);
-		elapsed_ms += dt_ms;
+		zassert_equal(r.res, REFLOW_RUN_DONE,
+			      "tau=%u ms: corrida terminou em %d no estagio %u (%s) "
+			      "apos %u ms: resfriamento passivo nao e falta",
+			      taus[i], r.res, r.stage, p->stages[r.stage].name,
+			      r.elapsed_ms);
+		zassert_true(r.temp_mc <= p->stages[p->n_stages - 1].target_mc,
+			     "tau=%u ms: terminou acima do alvo de resfriamento: %d mC",
+			     taus[i], r.temp_mc);
+		zassert_true(r.temp_mc > AMBIENT_MC - 1000,
+			     "tau=%u ms: o modelo esfriou abaixo do ambiente: %d mC",
+			     taus[i], r.temp_mc);
 	}
+}
+
+/*
+ * The slow oven, with an assertion of its own because it is the worst case and
+ * the one nobody was measuring. Finishing is necessary but not sufficient here:
+ * what this pins down is HOW MUCH of the cooling budget the slowest oven eats,
+ * so that a future change to a profile's stage table or to
+ * REFLOW_COOL_GRACE_MS cannot quietly spend the margin down to nothing and
+ * still look green.
+ */
+ZTEST(reflow_profile, test_slow_oven_fits_in_the_cooling_budget)
+{
+	const struct reflow_profile *p = reflow_profile_get(0);
+	const struct reflow_stage *cool;
+	struct cooling_result r;
+	uint32_t budget_ms;
+
+	zassert_not_null(p, "perfil 0 nao existe");
+	cool = &p->stages[p->n_stages - 1];
+	budget_ms = cool->nominal_ms + REFLOW_COOL_GRACE_MS;
+
+	r = cooling_run(TAU_SLOW_MS);
+
+	zassert_equal(r.res, REFLOW_RUN_DONE,
+		      "forno lento (tau=%u ms) terminou em %d no estagio %u (%s): "
+		      "uma corrida que soldou a placa certo virou falta",
+		      TAU_SLOW_MS, r.res, r.stage, p->stages[r.stage].name);
+
+	zassert_true(r.cool_ms <= budget_ms,
+		     "forno lento passou %u ms esfriando, acima do orcamento de "
+		     "%u ms (nominal %u + graca %u)",
+		     r.cool_ms, budget_ms, cool->nominal_ms, REFLOW_COOL_GRACE_MS);
 
 	/*
-	 * A assercao que fica vermelha sem o patch: REFLOW_RUN_ERR_TIMEOUT no
-	 * ultimo estagio, com a placa ja soldada e o aquecedor desligado desde
-	 * o inicio do resfriamento.
+	 * Said out loud rather than left implicit: this is the margin the slow
+	 * oven leaves on the table. If it ever reads as a handful of ticks, the
+	 * budget is being decided by luck.
 	 */
-	zassert_equal(res, REFLOW_RUN_DONE,
-		      "corrida terminou em %d no estagio %u (%s) apos %u ms: "
-		      "resfriamento passivo com tau=%u ms nao e falta",
-		      res, run.stage, p->stages[run.stage].name, elapsed_ms,
-		      OVEN_TAU_MS);
-	zassert_true(temp <= p->stages[p->n_stages - 1].target_mc,
-		     "terminou acima do alvo de resfriamento: %d mC", temp);
-	zassert_true(temp > AMBIENT_MC - 1000,
-		     "o modelo esfriou abaixo do ambiente: %d mC", temp);
+	printk("RFO-B32: slow oven used %u ms of a %u ms cooling budget "
+	       "(%u ms spare)\n", r.cool_ms, budget_ms, budget_ms - r.cool_ms);
 }
 
 /*
