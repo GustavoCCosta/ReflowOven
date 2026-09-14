@@ -86,6 +86,57 @@ function makeDom() {
 
 	[...new Set(ids)].forEach(mk);
 	els.prof.onchange = null;
+
+	/*
+	 * RFO-B22. The <select> gets the two behaviours of a real one, because
+	 * without them this harness cannot see the defect at all.
+	 *
+	 * 1. Assigning a value no <option> carries does NOT stick. That is the
+	 *    whole defect: update() writes sel.value on an empty select, the
+	 *    browser drops it silently, and lastProf keeps the value anyway. A stub
+	 *    that accepted any string would go green on the broken page - the
+	 *    happy-path measurement the ticket warns about.
+	 * 2. With options present and nothing selected, the FIRST one shows. That
+	 *    is what the operator was actually looking at while the oven ran
+	 *    another curve.
+	 *
+	 * Setting innerHTML to '' empties the option list, the way it does in a
+	 * browser; addProfiles() rebuilds from scratch every time and the old stub
+	 * quietly accumulated.
+	 */
+	{
+		const sel = els.prof;
+		let wanted = '';
+		let raw = '';
+
+		Object.defineProperty(sel, 'value', {
+			get() {
+				if (sel.options.some((o) => `${o.value}` === wanted)) {
+					return wanted;
+				}
+				return sel.options.length ? `${sel.options[0].value}` : '';
+			},
+			set(v) {
+				/*
+				 * DISCARDED, not remembered. A real <select> given a value
+				 * no option carries sets selectedIndex to -1 and reports
+				 * '' - the intent is gone, and adding the option later
+				 * does not bring it back. Recording it instead was the
+				 * first version of this stub, and it made the mutation of
+				 * addProfiles() stay GREEN: the wanted value survived the
+				 * empty select and reappeared once the options existed,
+				 * which is precisely the defect not happening.
+				 */
+				const v2 = `${v}`;
+
+				wanted = sel.options.some((o) => `${o.value}` === v2) ? v2 : '';
+			},
+		});
+		Object.defineProperty(sel, 'innerHTML', {
+			get() { return sel.options.map((o) => o.textContent).join(''); },
+			set(v) { raw = `${v}`; if (raw === '') { sel.options.length = 0; } },
+		});
+	}
 	return {
 		document: {
 			getElementById: (id) => els[id],
@@ -214,10 +265,26 @@ function run(locationObj, opts = {}) {
 		 */
 		fetch: (url) => {
 			if (String(url).indexOf('/api/cmd') < 0) {
-				return Promise.resolve({
+				const answer = {
 					ok: true, status: 200,
-					json: () => Promise.resolve({ profiles: ['a', 'b'] }),
-				});
+					json: () => Promise.resolve({
+						profiles: opts.profiles || ['a', 'b'],
+					}),
+				};
+
+				/*
+				 * RFO-B22. The profile list resolving when the TEST says so,
+				 * not when the microtask queue feels like it. The defect is an
+				 * ordering one - telemetry first, list second - and without
+				 * control of this promise there is no race to reproduce: a test
+				 * that just calls addProfiles() before the frame measures the
+				 * happy path.
+				 */
+				if (opts.holdProfiles) {
+					return new Promise((r) => { sandbox.releaseProfiles = () => r(answer); });
+				}
+
+				return Promise.resolve(answer);
 			}
 			if (opts.cmdRejects) {
 				return Promise.reject(new Error('network down'));
@@ -656,6 +723,89 @@ check('shell noise alone lists no profile', quietDom.sandbox.profs.length === 0,
 	      twice.serial.port.releases === 1, `releases=${twice.serial.port.releases}`);
 	check('and the screen still says disconnected',
 	      /desconectado/.test(shown(twice)), shown(twice));
+
+	/*
+	 * RFO-B22. The profile selector against the order the page cannot control:
+	 * the SSE frame arriving before /api/profiles resolves.
+	 *
+	 * update() assigns sel.value only when d.profile CHANGES - a guard that
+	 * keeps the page from fighting an operator mid-selection. On an empty
+	 * <select> that assignment is silently dropped while lastProf keeps the
+	 * value, so d.profile never changes again and every later sync is blocked.
+	 * The selector sticks on the first <option> while the oven runs another
+	 * curve. Same family as RFO-B17: the UI showing one profile and the oven
+	 * being on another, and the operator pressing Start on the wrong one.
+	 */
+	console.log('the profile selector against the arrival order');
+
+	const oven3 = { protocol: 'http:', hostname: '192.168.7.1' };
+	const three = ['SAC305 lead-free', 'Sn63Pb37', 'low-temp Bi58'];
+
+	/* The order of the defect: telemetry first, list second. */
+	const late = run(oven3, { profiles: three, holdProfiles: true });
+	await settle();
+
+	check('the list has not arrived yet',
+	      late.els.prof.innerHTML === '', JSON.stringify(late.els.prof.innerHTML));
+
+	late.sandbox.lastEs.onmessage({
+		data: JSON.stringify(Object.assign({}, sample, { profile: 2 })),
+	});
+	await settle();
+
+	/* Now the list resolves, and it is what has to restore the selection. */
+	late.sandbox.releaseProfiles();
+	await settle();
+	await settle();
+
+	check('the list arrived', /Sn63Pb37/.test(late.els.prof.innerHTML),
+	      late.els.prof.innerHTML);
+	check('the selector shows the profile telemetry reported, not the first option',
+	      `${late.els.prof.value}` === '2',
+	      `value=${JSON.stringify(late.els.prof.value)}`);
+
+	/*
+	 * The heart of it: a repeated frame carrying the SAME d.profile must not
+	 * leave the selector stuck. Before the fix this is where it stayed wrong
+	 * for ever - the guard had turned an optimisation into a trap.
+	 */
+	for (let i = 0; i < 3; i++) {
+		late.sandbox.lastEs.onmessage({
+			data: JSON.stringify(Object.assign({}, sample, { profile: 2 })),
+		});
+	}
+	await settle();
+	check('repeated frames with the same profile do not leave it stuck',
+	      `${late.els.prof.value}` === '2',
+	      `value=${JSON.stringify(late.els.prof.value)}`);
+
+	/*
+	 * The inverse order, which works today and must keep working: the list
+	 * first, the frame second.
+	 */
+	const early = run(oven3, { profiles: three });
+	await settle();
+	check('the list arrived first', /Sn63Pb37/.test(early.els.prof.innerHTML),
+	      early.els.prof.innerHTML);
+
+	early.sandbox.lastEs.onmessage({
+		data: JSON.stringify(Object.assign({}, sample, { profile: 1 })),
+	});
+	await settle();
+	check('list first, then telemetry, still selects the right profile',
+	      `${early.els.prof.value}` === '1',
+	      `value=${JSON.stringify(early.els.prof.value)}`);
+
+	/*
+	 * And the guard it rests on is still a guard: with no telemetry at all,
+	 * the list arriving must not invent a selection. lastProf is -1 here, and
+	 * the browser's own default - the first option - is what shows.
+	 */
+	const noFrame = run(oven3, { profiles: three });
+	await settle();
+	check('with no telemetry the list does not invent a selection',
+	      `${noFrame.els.prof.value}` === '0',
+	      `value=${JSON.stringify(noFrame.els.prof.value)}`);
 })().then(() => {
 	console.log(failures ? `\nFAILED (${failures})` : '\nall page checks passed');
 	process.exit(failures ? 1 : 0);
