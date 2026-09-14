@@ -28,7 +28,8 @@ target_sources(app PRIVATE
 
 # Optional features. Each one is a leaf: nothing in the core references them.
 target_sources_ifdef(CONFIG_REFLOW_UI_DISPLAY app PRIVATE src/ui/display_ui.c)
-target_sources_ifdef(CONFIG_REFLOW_UI_INPUT   app PRIVATE src/ui/input_ui.c)
+target_sources_ifdef(CONFIG_REFLOW_UI_INPUT   app PRIVATE src/ui/input_ui.c
+                                                          src/ui/buttonmap.c)
 target_sources_ifdef(CONFIG_REFLOW_SHELL      app PRIVATE src/shell_cmds.c)
 
 # Web UI: the server plus exactly one link implementation.

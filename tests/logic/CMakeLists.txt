@@ -12,6 +12,7 @@ target_sources(app PRIVATE
   ${CORE}/pid.c
   ${CORE}/profile.c
   ${CORE}/tempguard.c
+  ${SRC}/ui/buttonmap.c
   ${SRC}/net/cmdparse.c
   ${SRC}/net/httpgate.c
   ${SRC}/net/profiles_json.c
