@@ -141,6 +141,17 @@ function usbCmd(id){if(id=='profile')usbWrite('reflow profile '+document.getElem
  else usbWrite('reflow '+(id=='clear'?'clear':id));}
 function usbClose(){if(poll){clearInterval(poll);poll=null;}writer=null;port=null;
  document.getElementById('usb').style.display='';link('desconectado');}
+/* One line off the shell, whatever it is. The JSON frame is unmistakable, so
+   echo, prompt and VT100 colours are ignored on the way past.
+   Top level and named on purpose (RFO-B24): inside the read loop it was only
+   reachable with a real port, so the test re-implemented it and asserted on its
+   own copy - a suite that stayed green while this parser changed. */
+function shellLine(ln){
+ var i=ln.indexOf('{');
+ if(i>=0){try{update(JSON.parse(ln.slice(i)));}catch(e){}return;}
+ var m=ln.match(/\[(\d+)\]\s+(.+?)\s*$/);
+ if(m){profs[+m[1]]=m[2];addProfiles(profs);}
+}
 async function usbConnect(){
  if(!navigator.serial){link('este navegador nao tem Web Serial (use Chrome ou Edge)');return;}
  try{
@@ -159,13 +170,7 @@ async function usbConnect(){
     if(q.done)break;
     buf+=dec.decode(q.value,{stream:true});
     var lines=buf.split('\n');buf=lines.pop();
-    lines.forEach(function(ln){
-     /* A linha de JSON e inconfundivel: ignora eco, prompt e VT100 do shell. */
-     var i=ln.indexOf('{');
-     if(i>=0){try{update(JSON.parse(ln.slice(i)));}catch(e){}return;}
-     var m=ln.match(/\[(\d+)\]\s+(.+?)\s*$/);
-     if(m){profs[+m[1]]=m[2];addProfiles(profs);}
-    });
+    lines.forEach(shellLine);
    }
   }catch(e){}
   r.releaseLock();usbClose();
