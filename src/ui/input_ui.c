@@ -9,18 +9,30 @@
  */
 
 #include <zephyr/input/input.h>
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/version.h>
 
 #include "../core/app.h"
 #include "buttonmap.h"
+#include "selmap.h"
 
 LOG_MODULE_REGISTER(reflow_input, CONFIG_REFLOW_LOG_LEVEL);
 
 #define LONG_PRESS_MS 1000
 
-static uint8_t selected;
+/*
+ * RFO-B17. The panel's index and the rule for when telemetry may replace it,
+ * both in reflow_sel_*(), pure and tested in tests/logic/. What is left here is
+ * only what needs the kernel: the two callbacks and the command queue.
+ *
+ * Written by both threads, like the uint8_t it replaces - but every write now
+ * goes through a function whose contract says which value wins, and the next
+ * index is derived from the panel's own value instead of from whatever the
+ * last frame wrote. See selmap.c for why a lock alone would not have fixed it.
+ */
+static struct reflow_sel sel;
 static int64_t press_started;
 
 /*
@@ -33,30 +45,41 @@ static int64_t press_started;
 #define STATE_UNKNOWN (-1)
 static atomic_t last_state = ATOMIC_INIT(STATE_UNKNOWN);
 
-static void post(uint8_t id, int32_t arg)
+/* Returns 0 when the queue took the command. */
+static int post(uint8_t id, int32_t arg)
 {
 	struct reflow_cmd cmd = { .id = id, .arg = arg };
 
 	if (reflow_cmd_post(&cmd, K_NO_WAIT) != 0) {
 		LOG_WRN("command queue full, input dropped");
+		return -1;
 	}
+
+	return 0;
 }
 
 static void on_rotate(int32_t steps)
 {
 	uint8_t count = reflow_profile_count();
-	int32_t next;
+	int next;
 
-	if (count == 0U || atomic_get(&last_state) == REFLOW_STATE_RUNNING) {
+	if (atomic_get(&last_state) == REFLOW_STATE_RUNNING) {
 		return;
 	}
 
-	next = ((int32_t)selected + steps) % (int32_t)count;
-	if (next < 0) {
-		next += count;
+	next = reflow_sel_next(&sel, steps, count);
+	if (next == REFLOW_SEL_NONE) {
+		return;
 	}
-	selected = (uint8_t)next;
-	post(REFLOW_CMD_SELECT_PROFILE, selected);
+
+	/*
+	 * Commit only if the queue took it. A command the queue dropped is one
+	 * the controller will never confirm, and counting it as in flight would
+	 * make the panel ignore telemetry for no reason at all.
+	 */
+	if (post(REFLOW_CMD_SELECT_PROFILE, next) == 0) {
+		reflow_sel_commit(&sel, (uint8_t)next);
+	}
 }
 
 static void on_button(bool pressed)
@@ -124,8 +147,20 @@ static void telemetry_cb(const struct zbus_channel *chan)
 	const struct reflow_telemetry *t = zbus_chan_const_msg(chan);
 
 	atomic_set(&last_state, (atomic_val_t)t->state);
-	selected = t->profile_idx;
+	reflow_sel_telemetry(&sel, t->profile_idx);
 }
+
+/*
+ * Explicitly, and not by leaning on the static zero-initialisation that happens
+ * to match today: reflow_sel_init() is where the starting index is DECIDED, and
+ * the day it stops being 0 this file should not silently disagree with it.
+ */
+static int sel_init(void)
+{
+	reflow_sel_init(&sel);
+	return 0;
+}
+SYS_INIT(sel_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 ZBUS_LISTENER_DEFINE(reflow_input_lsnr, telemetry_cb);
 ZBUS_CHAN_ADD_OBS(reflow_telemetry_chan, reflow_input_lsnr, 4);

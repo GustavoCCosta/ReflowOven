@@ -15,6 +15,7 @@
 #include "profile.h"
 #include "net/cmdparse.h"
 #include "ui/buttonmap.h"
+#include "ui/selmap.h"
 #include "net/httpgate.h"
 #include "net/profiles_json.h"
 #include "net/sendbudget.h"
@@ -1973,3 +1974,254 @@ ZTEST(reflow_buttonmap, test_estado_fora_da_faixa_nao_energiza)
 }
 
 ZTEST_SUITE(reflow_buttonmap, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------------ profile selection */
+
+/*
+ * RFO-B17. The panel's profile index, and when telemetry is allowed to replace
+ * it. See src/ui/selmap.c for the defect; what matters here is that every
+ * assertion below runs without Zephyr, a driver or an encoder - nobody has the
+ * hardware, and what is proved here is the arithmetic and the resync rule, not
+ * the input path.
+ */
+
+/* Turn one detent at a time, the way the encoder reports it, and commit each
+ * command - which is what input_ui.c does when the queue accepts it. */
+static void turn(struct reflow_sel *s, int32_t steps, uint8_t count)
+{
+	int32_t dir = (steps < 0) ? -1 : 1;
+	int32_t i;
+
+	for (i = 0; i != steps; i += dir) {
+		int next = reflow_sel_next(s, dir, count);
+
+		zassert_not_equal(next, REFLOW_SEL_NONE,
+				  "count=%u should have something to select", count);
+		reflow_sel_commit(s, (uint8_t)next);
+	}
+}
+
+ZTEST(reflow_selmap, test_n_detents_land_on_initial_plus_n)
+{
+	/* The acceptance criterion, literally: N detents with no telemetry in
+	 * between must give (initial + N) mod count, deterministically. */
+	for (uint8_t count = 1U; count <= 8U; count++) {
+		for (int32_t n = 0; n <= 20; n++) {
+			struct reflow_sel s;
+
+			reflow_sel_init(&s);
+			turn(&s, n, count);
+
+			zassert_equal(reflow_sel_index(&s), (uint8_t)(n % count),
+				      "count=%u, %d detents: expected %d, got %u",
+				      count, n, n % count, reflow_sel_index(&s));
+		}
+	}
+}
+
+ZTEST(reflow_selmap, test_wrap_in_both_directions)
+{
+	struct reflow_sel s;
+
+	reflow_sel_init(&s);
+
+	/* Forward past the end. */
+	zassert_equal(reflow_sel_next(&s, 3, 3), 0, "3 of 3 wraps to 0");
+	zassert_equal(reflow_sel_next(&s, 4, 3), 1, "4 of 3 wraps to 1");
+
+	/* Backwards past the start: the index is unsigned and the count is
+	 * small, so this is where an int32_t % would hand back a negative. */
+	zassert_equal(reflow_sel_next(&s, -1, 3), 2, "-1 of 3 wraps to 2");
+	zassert_equal(reflow_sel_next(&s, -4, 3), 2, "-4 of 3 wraps to 2");
+
+	/* And from somewhere other than 0. */
+	reflow_sel_commit(&s, 2U);
+	zassert_equal(reflow_sel_next(&s, 1, 3), 0, "2 + 1 of 3 wraps to 0");
+	zassert_equal(reflow_sel_next(&s, -3, 3), 2, "2 - 3 of 3 wraps to 2");
+}
+
+ZTEST(reflow_selmap, test_degenerate_counts)
+{
+	struct reflow_sel s;
+
+	reflow_sel_init(&s);
+
+	/* No profiles at all: nothing to select, and no division by zero. */
+	zassert_equal(reflow_sel_next(&s, 1, 0), REFLOW_SEL_NONE,
+		      "count=0 must answer REFLOW_SEL_NONE");
+	zassert_equal(reflow_sel_next(&s, -7, 0), REFLOW_SEL_NONE,
+		      "count=0 must answer REFLOW_SEL_NONE in either direction");
+
+	/* Exactly one profile: every detent lands on it. */
+	for (int32_t n = -5; n <= 5; n++) {
+		zassert_equal(reflow_sel_next(&s, n, 1), 0,
+			      "count=1, %d detents should stay on 0", n);
+	}
+}
+
+ZTEST(reflow_selmap, test_extreme_step_counts_do_not_overflow)
+{
+	struct reflow_sel s;
+	int next;
+
+	reflow_sel_init(&s);
+
+	/*
+	 * `steps` is whatever the input subsystem reports. INT32_MIN through an
+	 * int32_t addition is undefined behaviour, and undefined behaviour in
+	 * the one function whose contract is determinism is not a theoretical
+	 * complaint. The answer only has to be IN RANGE - which value it is
+	 * depends on the count, and the point is that there is one.
+	 */
+	next = reflow_sel_next(&s, INT32_MIN, 3);
+	zassert_true(next >= 0 && next < 3, "INT32_MIN gave %d, out of 0..2", next);
+
+	next = reflow_sel_next(&s, INT32_MAX, 3);
+	zassert_true(next >= 0 && next < 3, "INT32_MAX gave %d, out of 0..2", next);
+}
+
+ZTEST(reflow_selmap, test_index_before_the_first_frame_is_zero)
+{
+	struct reflow_sel s;
+
+	reflow_sel_init(&s);
+
+	/*
+	 * The window RFO-B13 had to answer for the button, answered here for
+	 * the index: before any telemetry the panel shows 0, and that is not an
+	 * arbitrary default - controller.c boots at profile_idx 0 too, so the
+	 * panel and the oven agree by construction and the first detent counts
+	 * from where the oven actually is.
+	 */
+	zassert_equal(reflow_sel_index(&s), 0U, "the panel starts at profile 0");
+
+	/* And the first detent moves from there, not from somewhere else. */
+	zassert_equal(reflow_sel_next(&s, 1, 3), 1, "first detent goes 0 -> 1");
+}
+
+ZTEST(reflow_selmap, test_telemetry_is_authority_when_nothing_is_in_flight)
+{
+	struct reflow_sel s;
+
+	reflow_sel_init(&s);
+
+	/*
+	 * With no command in flight the oven wins, and it has to: this is the
+	 * path that carries a profile chosen over HTTP or from the shell onto
+	 * the panel. A panel that ignored it would show one profile while the
+	 * oven would run another.
+	 */
+	reflow_sel_telemetry(&s, 2U);
+	zassert_equal(reflow_sel_index(&s), 2U,
+		      "telemetry with nothing in flight must set the panel");
+
+	/* And the next detent counts from the value telemetry brought. */
+	zassert_equal(reflow_sel_next(&s, 1, 4), 3, "2 + 1 of 4 is 3");
+}
+
+/*
+ * THE test of this ticket. The scenario from the report, step by step:
+ * three profiles, index 0, three detents in ~30 ms. Before the controller
+ * drains them, the periodic publish arrives carrying the profile_idx it still
+ * had - the OLD one - and the next detent must not count from it.
+ *
+ * The frame has to be INJECTED mid-sequence. A test that only turns the
+ * encoder and looks at the index measures the easy case and would stay green
+ * on the broken code.
+ */
+ZTEST(reflow_selmap, test_a_stale_frame_mid_sequence_does_not_rewind_the_selection)
+{
+	struct reflow_sel s;
+	int next;
+
+	reflow_sel_init(&s);
+
+	/* Three detents, three commands posted and accepted: 0 -> 1 -> 2 -> 0. */
+	turn(&s, 3, 3);
+	zassert_equal(reflow_sel_index(&s), 0U,
+		      "three detents over three profiles come back to 0");
+
+	/*
+	 * The periodic publish, carrying the index from BEFORE the commands
+	 * were drained. On the broken code this wrote straight into the shared
+	 * `selected`.
+	 */
+	reflow_sel_telemetry(&s, 0U);
+
+	/*
+	 * 0 happens to be where the sequence landed, so use a sharper case: two
+	 * detents from 0 land on 2, and a stale frame carrying 1 - the index of
+	 * a profile the operator has ALREADY passed - arrives next.
+	 */
+	reflow_sel_init(&s);
+	turn(&s, 2, 3);
+	zassert_equal(reflow_sel_index(&s), 2U, "two detents from 0 land on 2");
+
+	reflow_sel_telemetry(&s, 1U);
+	zassert_equal(reflow_sel_index(&s), 2U,
+		      "a frame carrying the index of a profile already passed "
+		      "must not move the panel back to it");
+
+	/* And the decisive part: the NEXT detent counts from 2, not from the 1
+	 * the stale frame carried. Counting from 1 would give 2 again - the
+	 * selection standing still, which is the reported symptom. */
+	next = reflow_sel_next(&s, 1, 3);
+	zassert_equal(next, 0,
+		      "the detent after a stale frame must go 2 -> 0; got %d, "
+		      "which is the selection walking backwards (RFO-B17)",
+		      next);
+}
+
+ZTEST(reflow_selmap, test_confirming_frame_hands_authority_back)
+{
+	struct reflow_sel s;
+
+	reflow_sel_init(&s);
+	turn(&s, 2, 3);
+
+	/* The frame that confirms what was posted ends the in-flight window. */
+	reflow_sel_telemetry(&s, 2U);
+	zassert_equal(reflow_sel_index(&s), 2U, "the confirmed index stays");
+
+	/* Proof that the window really closed: the oven is believed again. */
+	reflow_sel_telemetry(&s, 1U);
+	zassert_equal(reflow_sel_index(&s), 1U,
+		      "after confirmation the panel follows telemetry again");
+}
+
+ZTEST(reflow_selmap, test_a_refused_command_does_not_deafen_the_panel_for_ever)
+{
+	struct reflow_sel s;
+	uint8_t i;
+
+	reflow_sel_init(&s);
+	turn(&s, 1, 3);
+	zassert_equal(reflow_sel_index(&s), 1U, "one detent lands on 1");
+
+	/*
+	 * SELECT_PROFILE can be refused: controller.c returns early while
+	 * RUNNING and for an index that does not resolve, and a refused command
+	 * never produces a confirming frame. Without a bound on the ignoring,
+	 * one refusal would leave the panel deaf to telemetry until the next
+	 * reset - a worse defect than the one this ticket removes, because the
+	 * operator would be looking at a profile the oven does not have and
+	 * would press start on it.
+	 */
+	for (i = 0U; i < REFLOW_SEL_STALE_FRAMES - 1U; i++) {
+		reflow_sel_telemetry(&s, 0U);
+		zassert_equal(reflow_sel_index(&s), 1U,
+			      "frame %u should still be ignored", i);
+	}
+
+	reflow_sel_telemetry(&s, 0U);
+	zassert_equal(reflow_sel_index(&s), 0U,
+		      "after %d disagreeing frames the panel must believe the "
+		      "oven again", REFLOW_SEL_STALE_FRAMES);
+
+	/* And it is really back to normal, not stuck the other way. */
+	reflow_sel_telemetry(&s, 2U);
+	zassert_equal(reflow_sel_index(&s), 2U,
+		      "the panel follows telemetry once it has given up");
+}
+
+ZTEST_SUITE(reflow_selmap, NULL, NULL, NULL, NULL, NULL);
