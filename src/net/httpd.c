@@ -150,6 +150,50 @@ BUILD_ASSERT(CONFIG_NET_BUF_RX_COUNT >= 32 && CONFIG_NET_BUF_TX_COUNT >= 32,
 	     "(RFO-G32)");
 
 /*
+ * RFO-B43. The socket service dispatcher thread, and the one sizing on this
+ * page that is NOT the HTTP thread's own.
+ *
+ * CONFIG_NET_SOCKETS_SERVICE_STACK_SIZE belongs to net_socket_service, the
+ * thread that polls the sockets a service registers and runs that service's
+ * work directly on its own stack. This app never registers one, but
+ * NET_DHCPV4_SERVER does - and that is REFLOW_LINK_USB_ECM and
+ * REFLOW_LINK_WIFI_AP, the two links on which the oven IS the network. The
+ * thread therefore exists on exactly the links where anything in cable or
+ * radio range can reach the page.
+ *
+ * Measured on ESP32-S3 in SoftAP while the page was being served (RFO-B43):
+ * the thread peaked at SOCKET_SERVICE_PEAK_B against the upstream default of
+ * 2400 that NET_DHCPV4_SERVER supplies, and the overflow did not announce
+ * itself - no HW_STACK_PROTECTION, no STACK_SENTINEL on this target. It
+ * corrupted the neighbouring kernel structure instead, and the board died in
+ * do_swap() on the first client that opened the page, with `Halting system`
+ * and the SSR gate left at whatever level the last PWM window wrote.
+ *
+ * The relation, not the number: the sizing has to keep the measured peak under
+ * two thirds of the stack. 4096 is the smallest power of two that does
+ * (2596 * 3 <= 4096 * 2: 63 % used, 1500 B spare); 3072 is not (85 % used) and
+ * the 2400 that shipped is not (108 %, which is the crash). Written as a
+ * relation, the build fails if the configdefault ever stops applying - which
+ * is exactly how RFO-B15 and RFO-G32 shipped wrong - or if a future link
+ * enables the service without paying for it.
+ */
+#ifdef CONFIG_NET_SOCKETS_SERVICE
+
+/*
+ * Peak stack use of net_socket_service, measured on the ESP32-S3 SoftAP build
+ * with THREAD_ANALYZER while the web UI was served (RFO-B43).
+ */
+#define SOCKET_SERVICE_PEAK_B 2596
+
+BUILD_ASSERT(CONFIG_NET_SOCKETS_SERVICE_STACK_SIZE * 2 >= SOCKET_SERVICE_PEAK_B * 3,
+	     "CONFIG_NET_SOCKETS_SERVICE_STACK_SIZE must keep the measured peak of "
+	     "net_socket_service under two thirds of the stack, or the thread "
+	     "overflows into the kernel with nothing to catch it and the board halts "
+	     "with the SSR gate still driven (RFO-B43)");
+
+#endif /* CONFIG_NET_SOCKETS_SERVICE */
+
+/*
  * RFO-B46. send_all() below is written on the promise that zsock_send() hands
  * control back after a slice, and that promise is setsockopt(SO_SNDTIMEO) - a
  * call that sockets_inet.c wraps entirely in

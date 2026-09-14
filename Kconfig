@@ -441,6 +441,38 @@ configdefault NET_MAX_CONTEXTS
 configdefault NET_MAX_CONN
 	default 10 if REFLOW_NET
 
+# RFO-B43. net_socket_service is the thread that polls the sockets a service
+# registers and runs that service's work on its own stack. The app registers
+# none, but NET_DHCPV4_SERVER does, and that is the USB and SoftAP links - the
+# two where the oven hands out addresses and IS the network.
+#
+# Upstream sizes that thread at 2400 when the DHCPv4 server is on. Measured on
+# ESP32-S3 in SoftAP with the page being served, it peaks at 2596: 108 % of the
+# stack, with no HW_STACK_PROTECTION and no STACK_SENTINEL on that target to
+# say so. It overflowed into the kernel instead and the board halted in
+# do_swap() on the first client that opened the page - with the SSR gate left
+# at the level the last PWM window wrote.
+#
+# 4096 is the smallest power of two that keeps the measured peak under two
+# thirds of the stack: 2596/4096 = 63 %, 1500 B spare. 3072 would be 85 %, and
+# the measured 2400 is the crash. The relation is asserted in httpd.c, so a
+# build where this default stops applying fails instead of shipping.
+#
+# Position matters for this one, unlike NET_CONTEXT_SNDTIMEO above: upstream
+# gives the symbol four defaults (2400 if QUIC, 2400 if NET_DHCPV4_SERVER,
+# 1400 if MDNS_RESPONDER, 1200), so a configdefault parsed after the tree would
+# land behind `2400 if NET_DHCPV4_SERVER` and never apply on the exact two
+# links that have the thread. It belongs before the `source`, and the .config
+# is what says so.
+#
+# Conditioned on REFLOW_NET and not on the two links by name: the symbol only
+# exists when something selects NET_SOCKETS_SERVICE, so on the Wi-Fi station
+# link - which brings the DHCPv4 CLIENT and no service - this costs nothing,
+# and it keeps covering the thread if another net leaf ever registers a
+# service of its own. With REFLOW_NET=n there is no default and no thread.
+configdefault NET_SOCKETS_SERVICE_STACK_SIZE
+	default 4096 if REFLOW_NET
+
 configdefault NET_PKT_RX_COUNT
 	default 16 if REFLOW_NET
 
