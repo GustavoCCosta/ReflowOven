@@ -20,6 +20,7 @@
 #include "net/profiles_json.h"
 #include "net/sendbudget.h"
 #include "net/wifi_ap_cfg.h"
+#include "net/wifipolicy.h"
 #include "tempguard.h"
 
 /* ------------------------------------------------------------------ PID */
@@ -2341,3 +2342,205 @@ ZTEST(reflow_selmap, test_a_refused_command_does_not_deafen_the_panel_for_ever)
 }
 
 ZTEST_SUITE(reflow_selmap, NULL, NULL, NULL, NULL, NULL);
+
+/* ------------------------------------------------- Wi-Fi reconnect policy */
+
+/*
+ * RFO-B16. wifi_thread() used to leave its loop with a `break` as soon as the
+ * link came up once, so when the association dropped the thread that would
+ * re-issue NET_REQUEST_WIFI_CONNECT was already gone. The web UI - and the
+ * remote Stop button on it - came back only on a power cycle, with the oven
+ * mid-run.
+ *
+ * Everything below runs without Zephyr, a radio or an access point. What is
+ * proved here is the POLICY: when it retries, how far apart, whether it ever
+ * gives up, and when the DHCP lease is treated as stale. Whether the driver
+ * then actually reassociates is bench work and is NOT claimed by these tests.
+ */
+
+ZTEST(reflow_wifipolicy, test_first_call_connects_with_nothing_to_discard)
+{
+	struct reflow_wifi_policy p;
+	struct reflow_wifi_step s;
+
+	reflow_wifi_policy_init(&p);
+	s = reflow_wifi_policy_step(&p, false);
+
+	zassert_equal(s.action, REFLOW_WIFI_CONNECT,
+		      "the first call with no link must ask for a connect");
+	zassert_equal(s.wait_ms, REFLOW_WIFI_RETRY_MIN_MS,
+		      "the first wait should be the floor, got %u", s.wait_ms);
+	zassert_false(s.stale_lease,
+		      "nothing has been associated yet, so there is no lease to "
+		      "throw away");
+}
+
+ZTEST(reflow_wifipolicy, test_a_ready_link_is_watched_and_not_reconnected)
+{
+	struct reflow_wifi_policy p;
+	struct reflow_wifi_step s;
+	int i;
+
+	reflow_wifi_policy_init(&p);
+	(void)reflow_wifi_policy_step(&p, false);
+	s = reflow_wifi_policy_step(&p, true);
+
+	zassert_equal(s.action, REFLOW_WIFI_WATCH,
+		      "an associated link must not be reconnected");
+	zassert_equal(s.wait_ms, REFLOW_WIFI_SUPERVISE_MS,
+		      "supervision period should be %u ms, got %u",
+		      REFLOW_WIFI_SUPERVISE_MS, s.wait_ms);
+
+	/* And it stays watching, however long the link holds. */
+	for (i = 0; i < 100; i++) {
+		s = reflow_wifi_policy_step(&p, true);
+		zassert_equal(s.action, REFLOW_WIFI_WATCH,
+			      "turn %d: a link that is up must stay watched", i);
+	}
+}
+
+/*
+ * THE test of this ticket. The scenario from the report: the link comes up,
+ * then drops, and the policy has to ask for a connect. The `break` in
+ * wifi.c made this case unreachable, and nothing measured it.
+ */
+ZTEST(reflow_wifipolicy, test_a_drop_after_the_link_was_up_reconnects)
+{
+	struct reflow_wifi_policy p;
+	struct reflow_wifi_step s;
+
+	reflow_wifi_policy_init(&p);
+
+	/* Boot, associate. */
+	(void)reflow_wifi_policy_step(&p, false);
+	s = reflow_wifi_policy_step(&p, true);
+	zassert_equal(s.action, REFLOW_WIFI_WATCH, "the link came up");
+
+	/* The access point goes away. */
+	s = reflow_wifi_policy_step(&p, false);
+
+	zassert_equal(s.action, REFLOW_WIFI_CONNECT,
+		      "a link that was up and dropped must be reconnected; "
+		      "giving up here is RFO-B16, and it costs the operator the "
+		      "remote Stop button until someone power-cycles a heating oven");
+	zassert_true(s.stale_lease,
+		     "the lease was obtained on the previous association and must "
+		     "not be carried into the new one");
+	zassert_equal(s.wait_ms, REFLOW_WIFI_RETRY_MIN_MS,
+		      "the first retry of a new round should start at the floor, "
+		      "not inherit the ceiling; got %u", s.wait_ms);
+}
+
+ZTEST(reflow_wifipolicy, test_repeated_drops_do_not_spend_the_attempts)
+{
+	struct reflow_wifi_policy p;
+	struct reflow_wifi_step s;
+	int cycle;
+
+	reflow_wifi_policy_init(&p);
+
+	/*
+	 * Ten associate/drop cycles. Each new round has to behave like the
+	 * first one: connect, at the floor. A policy that counted attempts
+	 * across rounds would creep up to the ceiling and make the tenth
+	 * outage take twice as long to recover as the first, for no reason
+	 * the operator could see.
+	 */
+	for (cycle = 0; cycle < 10; cycle++) {
+		s = reflow_wifi_policy_step(&p, false);
+		zassert_equal(s.action, REFLOW_WIFI_CONNECT,
+			      "cycle %d: must ask for a connect", cycle);
+		zassert_equal(s.wait_ms, REFLOW_WIFI_RETRY_MIN_MS,
+			      "cycle %d: a fresh round starts at the floor, got %u",
+			      cycle, s.wait_ms);
+
+		s = reflow_wifi_policy_step(&p, true);
+		zassert_equal(s.action, REFLOW_WIFI_WATCH,
+			      "cycle %d: the link came back", cycle);
+	}
+}
+
+ZTEST(reflow_wifipolicy, test_the_spacing_is_the_stated_sequence)
+{
+	struct reflow_wifi_policy p;
+	struct reflow_wifi_step s;
+	int i;
+
+	reflow_wifi_policy_init(&p);
+
+	/*
+	 * The spacing asserted in numbers, as the ticket demands: 15 s, then
+	 * doubling to the 30 s ceiling, then flat for ever.
+	 */
+	s = reflow_wifi_policy_step(&p, false);
+	zassert_equal(s.wait_ms, 15000U, "attempt 1 should wait 15 s, got %u",
+		      s.wait_ms);
+
+	s = reflow_wifi_policy_step(&p, false);
+	zassert_equal(s.wait_ms, 30000U, "attempt 2 should wait 30 s, got %u",
+		      s.wait_ms);
+
+	/*
+	 * And the ceiling holds. 200 turns is about 100 minutes of outage; the
+	 * wait must not creep past 30 s, because the recovery budget the
+	 * original ticket stated - the UI back within 60 s of the AP returning
+	 * - is one whole wait plus one association.
+	 */
+	for (i = 3; i <= 200; i++) {
+		s = reflow_wifi_policy_step(&p, false);
+		zassert_equal(s.wait_ms, REFLOW_WIFI_RETRY_MAX_MS,
+			      "attempt %d waited %u ms, above the %u ms ceiling",
+			      i, s.wait_ms, REFLOW_WIFI_RETRY_MAX_MS);
+	}
+}
+
+ZTEST(reflow_wifipolicy, test_it_never_gives_up)
+{
+	struct reflow_wifi_policy p;
+	struct reflow_wifi_step s;
+	int i;
+
+	reflow_wifi_policy_init(&p);
+
+	/*
+	 * A whole day of outage at the 30 s ceiling is 2880 turns. There is no
+	 * attempt cap on purpose: the only thing giving up buys is an oven that
+	 * cannot be stopped remotely, and the thing it costs is one net_mgmt()
+	 * call every 30 s.
+	 */
+	for (i = 0; i < 3000; i++) {
+		s = reflow_wifi_policy_step(&p, false);
+		zassert_equal(s.action, REFLOW_WIFI_CONNECT,
+			      "turn %d: the policy stopped asking for a connect", i);
+		zassert_true(s.wait_ms >= REFLOW_WIFI_RETRY_MIN_MS &&
+			     s.wait_ms <= REFLOW_WIFI_RETRY_MAX_MS,
+			     "turn %d: wait %u ms fell outside [%u, %u] - an "
+			     "overflowing backoff would hand back a tiny delay "
+			     "exactly when the link has been down longest",
+			     i, s.wait_ms, REFLOW_WIFI_RETRY_MIN_MS,
+			     REFLOW_WIFI_RETRY_MAX_MS);
+	}
+}
+
+ZTEST(reflow_wifipolicy, test_the_ceiling_fits_the_recovery_budget)
+{
+	/*
+	 * Not a property of one run - a property of the constants, and the one
+	 * that ties them to the requirement. The original criterion is that the
+	 * web UI is back within 60 s of the access point returning. The worst
+	 * case is the AP coming back an instant after an attempt failed, so
+	 * recovery costs one supervision period plus one whole wait, and what
+	 * is left over is the time the association itself may take.
+	 *
+	 * If someone raises the ceiling, this is what says no.
+	 */
+	zassert_true(REFLOW_WIFI_SUPERVISE_MS + REFLOW_WIFI_RETRY_MAX_MS < 60000U,
+		     "supervision %u + ceiling %u leaves nothing of the 60 s "
+		     "recovery budget for the association itself",
+		     REFLOW_WIFI_SUPERVISE_MS, REFLOW_WIFI_RETRY_MAX_MS);
+
+	zassert_true(REFLOW_WIFI_RETRY_MIN_MS <= REFLOW_WIFI_RETRY_MAX_MS,
+		     "the floor cannot be above the ceiling");
+}
+
+ZTEST_SUITE(reflow_wifipolicy, NULL, NULL, NULL, NULL, NULL);

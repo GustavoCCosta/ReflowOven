@@ -19,5 +19,6 @@ target_sources(app PRIVATE
   ${SRC}/net/profiles_json.c
   ${SRC}/net/sendbudget.c
   ${SRC}/net/wifi_ap_cfg.c
+  ${SRC}/net/wifipolicy.c
 )
 target_include_directories(app PRIVATE ${CORE} ${SRC})
