@@ -139,8 +139,32 @@ var port=null,writer=null,poll=null;
 function usbWrite(line){if(writer)writer.write(new TextEncoder().encode(line+'\r\n'));}
 function usbCmd(id){if(id=='profile')usbWrite('reflow profile '+document.getElementById('prof').value);
  else usbWrite('reflow '+(id=='clear'?'clear':id));}
-function usbClose(){if(poll){clearInterval(poll);poll=null;}writer=null;port=null;
- document.getElementById('usb').style.display='';link('desconectado');}
+/* RFO-B21. The writer's lock and the port itself are released here, and the
+   ORDER is the whole design.
+
+   1. Everything the operator sees is set SYNCHRONOUSLY, before the first await.
+      RFO-T49 pinned down that `desconectado` survives a telemetry frame that
+      was already buffered when the link dropped, and that property rests on
+      this function running after the read loop leaves its `while`. An await
+      placed before the message would hand control back mid-teardown and let a
+      late frame wipe it. So the message goes up first, and the slow part after.
+   2. `writer` and `port` are captured into locals and nulled BEFORE the close
+      is awaited. That is what makes the function safe to call twice - the
+      disconnect listener calls it directly and the read loop calls it again on
+      its way out - because the second caller finds null and closes nothing. No
+      reentrancy flag: a flag would make the second call a no-op and could leave
+      the screen showing whatever the first call was interrupted by.
+   3. If close() rejects there is nothing left holding a stale reference, since
+      the nulling already happened. The operator is told, because a port the
+      browser refused to close is one the next connect will refuse to open, and
+      silence there is how this defect stayed invisible in the first place. */
+async function usbClose(){
+ if(poll){clearInterval(poll);poll=null;}
+ var w=writer,p=port;writer=null;port=null;
+ document.getElementById('usb').style.display='';link('desconectado');
+ if(w){try{w.releaseLock();}catch(e){}}
+ if(p){try{await p.close();}catch(e){link('desconectado (a porta nao fechou: '+e.message+')');}}
+}
 /* One line off the shell, whatever it is. The JSON frame is unmistakable, so
    echo, prompt and VT100 colours are ignored on the way past.
    Top level and named on purpose (RFO-B24): inside the read loop it was only
