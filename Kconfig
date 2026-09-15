@@ -473,6 +473,26 @@ configdefault NET_MAX_CONN
 configdefault NET_SOCKETS_SERVICE_STACK_SIZE
 	default 4096 if REFLOW_NET
 
+# RFO-B49. The LVGL memory pool and rendering buffer, and the THIRD time this
+# file has shipped a number it did not mean (RFO-B15, RFO-G32).
+#
+# Measured on rpi_pico2 with the display overlay and REFLOW_UI_DISPLAY=y: the
+# image built with LV_Z_MEM_POOL_SIZE=2048 and LV_Z_VDB_SIZE=10 while this file
+# claimed 24576 and 16 - a pool one twelfth of the declared size, on a target
+# nobody has ever run. Upstream gives both an unconditional default
+# (zephyr/modules/lvgl/Kconfig.memory:40 and :73), so parsed after the tree
+# these landed behind it and never applied.
+#
+# The numbers themselves are DECLARATIONS, not measurements: ui_build() has
+# never run, so nobody knows what the pool actually needs. What moving them
+# fixes is the divergence between what the file says and what the image gets,
+# which is a different and answerable question.
+configdefault LV_Z_MEM_POOL_SIZE
+	default 24576 if REFLOW_UI_DISPLAY
+
+configdefault LV_Z_VDB_SIZE
+	default 16 if REFLOW_UI_DISPLAY
+
 configdefault NET_PKT_RX_COUNT
 	default 16 if REFLOW_NET
 
@@ -523,12 +543,13 @@ source "Kconfig.zephyr"
 # or on the command line still wins. Requires Zephyr 3.7 or newer.
 
 # --- display UI (LVGL) ---
-configdefault LV_Z_MEM_POOL_SIZE
-	default 24576 if REFLOW_UI_DISPLAY
-
-configdefault LV_Z_VDB_SIZE
-	default 16 if REFLOW_UI_DISPLAY
-
+# These two stay AFTER the source, and that is measured, not left over
+# (RFO-B49). Upstream declares both as plain bools with no `default` at all
+# (modules/lib/gui/lvgl/Kconfig), so their default list is empty and a
+# configdefault wins wherever it is parsed - the same reasoning the
+# NET_CONTEXT_SNDTIMEO block above spells out. The build agrees: with the two
+# sizing symbols moved and these left here, the .config comes out with
+# LV_FONT_MONTSERRAT_28=y and LV_USE_LOG unset.
 configdefault LV_FONT_MONTSERRAT_28
 	default y if REFLOW_UI_DISPLAY
 

@@ -47,6 +47,27 @@ LOG_MODULE_REGISTER(reflow_display, CONFIG_REFLOW_LOG_LEVEL);
 CONFIG_REFLOW_UI_DISPLAY=n (see 'Targets and wiring' in README.md)"
 #endif
 
+/*
+ * RFO-B49. These do not defend the NUMBERS - nobody has run ui_build(), so what
+ * the pool really needs is unknown and 24576 is a declaration. What they defend
+ * is that the declaration and the image agree.
+ *
+ * Three times now a configdefault in this project's Kconfig sat after
+ * `source "Kconfig.zephyr"`, landed behind an unconditional upstream default
+ * and never applied, while the file went on claiming the number: ZVFS_POLL_MAX
+ * (RFO-B15), the NET_* sizing (RFO-G32), and these two. Each time the .config
+ * was what found it, and each time it was found by accident. A build-time check
+ * is what turns the fourth time into a failed build instead of a discovery.
+ */
+BUILD_ASSERT(CONFIG_LV_Z_MEM_POOL_SIZE >= 24576,
+	     "CONFIG_LV_Z_MEM_POOL_SIZE is below what this app's Kconfig declares "
+	     "for REFLOW_UI_DISPLAY: the configdefault stopped applying, which is "
+	     "how RFO-B15 and RFO-G32 shipped wrong numbers (RFO-B49)");
+
+BUILD_ASSERT(CONFIG_LV_Z_VDB_SIZE >= 16,
+	     "CONFIG_LV_Z_VDB_SIZE is below what this app's Kconfig declares for "
+	     "REFLOW_UI_DISPLAY: same failure, same cause (RFO-B49)");
+
 ZBUS_SUBSCRIBER_DEFINE(reflow_display_sub, 4);
 ZBUS_CHAN_ADD_OBS(reflow_telemetry_chan, reflow_display_sub, 3);
 
