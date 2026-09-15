@@ -1280,42 +1280,194 @@ ZTEST(reflow_httpgate, test_no_prefix_of_a_valid_request_is_allowed)
 }
 
 /*
- * Single byte corruption sweep. Deterministic: every position gets four
- * substitutions chosen to hit the parser's structure (NUL, CR, colon, space).
- * The point is not that each one is refused — corrupting the query string still
- * leaves a valid authorised request — but that none of them reads out of bounds
- * or loops forever.
+ * RFO-G08. What this replaced asserted was `allowed >= 0` on a counter that
+ * only increments - true for every possible implementation of
+ * reflow_gate_check(), including `return REFLOW_GATE_ALLOW;`. It cost 124
+ * iterations and bought nothing, on the decision that guards the one HTTP route
+ * that can energise the element.
+ *
+ * The author's comment was honest about why: the sweep started from a VALID
+ * request, so some corruptions legitimately still pass, and there was nothing
+ * unconditional to claim. The way out is to sweep the other direction.
+ *
+ *   Corrupting one byte must never turn an UNAUTHORISED request into an
+ *   authorised one.
+ *
+ * That holds without a caveat, and it is the property that matches the risk:
+ * somebody without a token getting ALLOW.
  */
-ZTEST(reflow_httpgate, test_single_byte_corruption_is_survivable)
+
+static const char gate_pokes[] = { '\0', '\r', '\n', ':', ' ', 'X', '0', '.' };
+
+/*
+ * Replace one byte at a time across [from, to) and fail on the first ALLOW.
+ *
+ * The guard on the base is not decoration: a base that is already allowed makes
+ * the whole sweep vacuous, which is the failure mode this ticket exists to
+ * remove. It is asserted rather than assumed.
+ */
+static void sweep_never_allows(const char *what, const char *base,
+			       size_t from, size_t to)
 {
-	static const char full[] =
+	char buf[512];
+	size_t n = strlen(base);
+	size_t i, k;
+
+	zassert_true(n + 1U <= sizeof(buf),
+		     "%s: request does not fit the sweep buffer", what);
+	zassert_not_equal(reflow_gate_check(base, TOKEN), REFLOW_GATE_ALLOW,
+			  "%s: the base request is ALREADY allowed, so every "
+			  "assertion below would be vacuous", what);
+
+	for (i = from; i < to && i < n; i++) {
+		for (k = 0; k < sizeof(gate_pokes); k++) {
+			memcpy(buf, base, n + 1U);
+			buf[i] = gate_pokes[k];
+
+			zassert_not_equal(reflow_gate_check(buf, TOKEN),
+					  REFLOW_GATE_ALLOW,
+					  "%s: replacing byte %u (0x%02x) with "
+					  "0x%02x turned an unauthorised request "
+					  "into an authorised one",
+					  what, (unsigned int)i,
+					  (unsigned int)(unsigned char)base[i],
+					  (unsigned int)(unsigned char)gate_pokes[k]);
+		}
+	}
+}
+
+/* Offset of the first byte after the request line, i.e. where headers start. */
+static size_t header_start(const char *req)
+{
+	const char *eol = strstr(req, "\r\n");
+
+	zassert_not_null(eol, "the base request has no request line");
+	return (size_t)(eol - req) + 2U;
+}
+
+/* Offsets of a header's VALUE, given the header prefix including ": ". */
+static void value_span(const char *req, const char *prefix,
+		       size_t *from, size_t *to)
+{
+	const char *v = strstr(req, prefix);
+	const char *e;
+
+	zassert_not_null(v, "header '%s' not in the base request", prefix);
+	v += strlen(prefix);
+	e = strstr(v, "\r\n");
+	zassert_not_null(e, "header '%s' has no line ending", prefix);
+
+	*from = (size_t)(v - req);
+	*to = (size_t)(e - req);
+}
+
+/*
+ * Two bases whose refusal comes from the token, swept over the WHOLE header
+ * block - names included. Corrupting the name `X-Reflow-Token` only makes the
+ * gate stop seeing a token at all, which is still a refusal, so nothing has to
+ * be carved out here.
+ *
+ * The wrong token differs from the real one in length and in most of its bytes,
+ * deliberately: a bad token one byte away from the good one would make this
+ * sweep fail for a reason that says nothing about the gate.
+ */
+ZTEST(reflow_httpgate, test_no_single_byte_turns_a_bad_token_into_a_good_one)
+{
+	static const char wrong_token[] =
 		"POST /api/cmd?id=start HTTP/1.1\r\n"
 		"Host: 192.168.7.1\r\n"
 		"Origin: http://192.168.7.1\r\n"
+		"X-Reflow-Token: WRONG\r\n"
+		"\r\n";
+
+	sweep_never_allows("wrong token", wrong_token,
+			   header_start(wrong_token), strlen(wrong_token));
+}
+
+/*
+ * A token that IS a real prefix of the configured one - the truncation case,
+ * which is what VALUE_MAX in httpgate.c calls out as the way a wrong token
+ * becomes a right one.
+ *
+ * What its refusal actually rests on, measured rather than assumed: token_ok()
+ * reads past the end of a short value as zero, so the comparison fails on the
+ * first byte the prefix does not have. It is NOT the length term in the
+ * accumulator - dropping that leaves this base refused, and the case that
+ * catches it is a token LONGER than the real one, already covered by
+ * test_token_must_be_present_and_exact. Saying so because a comment claiming
+ * the wrong guarantee is how the assertion this ticket replaced came to exist.
+ */
+ZTEST(reflow_httpgate, test_no_single_byte_turns_a_prefix_into_the_token)
+{
+	static const char prefix_token[] =
+		"POST /api/cmd?id=start HTTP/1.1\r\n"
+		"Host: 192.168.7.1\r\n"
+		"Origin: http://192.168.7.1\r\n"
+		"X-Reflow-Token: s3gred0\r\n"
+		"\r\n";
+
+	sweep_never_allows("prefix token", prefix_token,
+			   header_start(prefix_token), strlen(prefix_token));
+}
+
+ZTEST(reflow_httpgate, test_no_single_byte_conjures_a_missing_token)
+{
+	static const char no_token[] =
+		"POST /api/cmd?id=start HTTP/1.1\r\n"
+		"Host: 192.168.7.1\r\n"
+		"Origin: http://192.168.7.1\r\n"
+		"\r\n";
+
+	sweep_never_allows("no token", no_token,
+			   header_start(no_token), strlen(no_token));
+}
+
+/*
+ * The Origin and Host bases are swept over their VALUES only, and the exclusion
+ * of the header NAME is a measured decision, not an oversight.
+ *
+ * Corrupting a byte of the name `Origin` does not repair the mismatch - it
+ * makes the gate stop recognising the header, org.seen stays 0, and the
+ * comparison is skipped. Measured on this tree: 32 of those corruptions end in
+ * ALLOW. That is not a bypass, and the reason is the token: these bases carry a
+ * VALID one, so anyone able to rename a header already holds the secret and
+ * could command the oven without touching Origin at all. In the attack Origin
+ * exists to stop - a cross-site page - the browser writes that header and the
+ * attacker cannot rename it.
+ *
+ * So the claim is scoped to what the check is actually responsible for: the
+ * VALUE. Corrupting it must never make a foreign authority acceptable.
+ */
+ZTEST(reflow_httpgate, test_no_single_byte_makes_a_foreign_origin_acceptable)
+{
+	static const char bad_origin[] =
+		"POST /api/cmd?id=start HTTP/1.1\r\n"
+		"Host: 192.168.7.1\r\n"
+		"Origin: http://10.0.0.9\r\n"
 		"X-Reflow-Token: " TOKEN "\r\n"
 		"\r\n";
-	static const char pokes[] = { '\0', '\r', ':', ' ' };
-	char buf[sizeof(full)];
-	size_t i, k;
-	int allowed = 0;
+	size_t from, to;
 
-	for (i = 0; i < sizeof(full) - 1U; i++) {
-		for (k = 0; k < sizeof(pokes); k++) {
-			memcpy(buf, full, sizeof(full));
-			buf[i] = pokes[k];
-			if (reflow_gate_check(buf, TOKEN) == REFLOW_GATE_ALLOW) {
-				allowed++;
-			}
-		}
-	}
+	value_span(bad_origin, "Origin: ", &from, &to);
+	sweep_never_allows("foreign origin", bad_origin, from, to);
+}
 
-	/*
-	 * Corrupting a byte must never turn an unauthorised request into an
-	 * authorised one; here the request starts out valid, so some corruptions
-	 * legitimately still pass (anything inside the query string). What must
-	 * hold is that the sweep completes without a fault.
-	 */
-	zassert_true(allowed >= 0, "sweep completed");
+/*
+ * The rebinding refusal, same shape. A Host that is a name and not an address
+ * literal is refused, and no single byte of that name may turn it into
+ * something is_ipv4_authority() accepts.
+ */
+ZTEST(reflow_httpgate, test_no_single_byte_makes_a_named_host_acceptable)
+{
+	static const char named_host[] =
+		"POST /api/cmd?id=start HTTP/1.1\r\n"
+		"Host: oven.local\r\n"
+		"X-Reflow-Token: " TOKEN "\r\n"
+		"\r\n";
+	size_t from, to;
+
+	value_span(named_host, "Host: ", &from, &to);
+	sweep_never_allows("named host", named_host, from, to);
 }
 
 ZTEST_SUITE(reflow_httpgate, NULL, NULL, NULL, NULL, NULL);
