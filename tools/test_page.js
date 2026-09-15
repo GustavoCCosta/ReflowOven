@@ -136,13 +136,50 @@ function makeSerial(opts) {
 		}
 	};
 
+	/*
+	 * RFO-B21. The stub now has the state a real SerialPort has: it is open
+	 * or it is not, and open() on an already-open port throws
+	 * InvalidStateError exactly as Chrome does. Without that, a reconnection
+	 * test measures the easy case - it would pass on the broken page, where
+	 * close() was never called at all.
+	 */
+	let isOpen = false;
+
 	const port = {
-		open: () => (opts.usbOpenRejects
-			? Promise.reject(new Error('access denied'))
-			: Promise.resolve()),
-		writable: { getWriter: () => ({ write() {} }) },
+		open: () => {
+			if (opts.usbOpenRejects) {
+				return Promise.reject(new Error('access denied'));
+			}
+			if (isOpen) {
+				return Promise.reject(
+					new DOMException('The port is already open.',
+							 'InvalidStateError'));
+			}
+			isOpen = true;
+			return Promise.resolve();
+		},
+		close: () => {
+			port.closes++;
+			if (opts.usbCloseRejects) {
+				return Promise.reject(new Error('device busy'));
+			}
+			isOpen = false;
+			/* A closed port hands out a fresh reader next time. */
+			queue.length = 0;
+			pendingResolve = null;
+			return Promise.resolve();
+		},
+		writable: {
+			getWriter: () => ({
+				write() {},
+				releaseLock() { port.releases++; },
+			}),
+		},
 		readable: { getReader: () => reader },
 		/* The test's API, not the page's. */
+		closes: 0,
+		releases: 0,
+		get isOpen() { return isOpen; },
 		feed: (text) => push({
 			done: false,
 			value: new TextEncoder().encode(text),
@@ -536,6 +573,89 @@ check('shell noise alone lists no profile', quietDom.sandbox.profs.length === 0,
 	      /desconectado/.test(shown(drop)), shown(drop));
 	check('the USB button comes back after a disconnect',
 	      drop.els.usb.style.display === '', drop.els.usb.style.display);
+
+	/*
+	 * RFO-B21. usbClose() nulled `writer` and `port` and stopped there - no
+	 * releaseLock(), no close(). The SerialPort stayed open with its
+	 * writable locked, so the next usbConnect() got the same port back from
+	 * requestPort() and open() threw InvalidStateError. The operator lost
+	 * sight of the oven mid-cycle and only got it back by reloading.
+	 *
+	 * The stub port refuses open() while it is already open, which is what
+	 * makes these assertions mean something: on the broken page the second
+	 * connect fails here exactly as it does in Chrome.
+	 */
+	console.log('closing the serial port, and opening it again');
+
+	const reconn = run(usbFile, { serial: true });
+	await reconn.sandbox.usbConnect();
+	await settle();
+	check('first connection is up',
+	      /conectado pela porta USB/.test(shown(reconn)), shown(reconn));
+	check('and the stub port agrees it is open',
+	      reconn.serial.port.isOpen === true, `isOpen=${reconn.serial.port.isOpen}`);
+
+	await reconn.sandbox.usbClose();
+	await settle();
+
+	check('close() was actually called on the port',
+	      reconn.serial.port.closes === 1, `closes=${reconn.serial.port.closes}`);
+	check('and the writer lock was actually released',
+	      reconn.serial.port.releases === 1, `releases=${reconn.serial.port.releases}`);
+	check('the port is no longer open',
+	      reconn.serial.port.isOpen === false, `isOpen=${reconn.serial.port.isOpen}`);
+
+	/* The case in the report: connect again, on the same port. */
+	await reconn.sandbox.usbConnect();
+	await settle();
+	check('reconnecting on the same port works',
+	      /conectado pela porta USB/.test(shown(reconn)), shown(reconn));
+	check('and it did not report InvalidStateError',
+	      !/InvalidState/i.test(shown(reconn)), shown(reconn));
+
+	/*
+	 * A close() that rejects. The page must not be left holding a port it
+	 * cannot use: `port` and `writer` are nulled before the close is
+	 * awaited, precisely so a rejection cannot strand them.
+	 */
+	const stuck = run(usbFile, { serial: true, usbCloseRejects: true });
+	await stuck.sandbox.usbConnect();
+	await settle();
+	await stuck.sandbox.usbClose();
+	await settle();
+
+	check('a refused close still tried',
+	      stuck.serial.port.closes === 1, `closes=${stuck.serial.port.closes}`);
+	check('a refused close leaves no port behind',
+	      stuck.sandbox.port === null, `port=${stuck.sandbox.port}`);
+	check('a refused close leaves no writer behind',
+	      stuck.sandbox.writer === null, `writer=${stuck.sandbox.writer}`);
+	check('a refused close still says disconnected',
+	      /desconectado/.test(shown(stuck)), shown(stuck));
+	check('and it tells the operator the port did not close',
+	      /nao fechou/.test(shown(stuck)), shown(stuck));
+	check('the USB button is back after a refused close',
+	      stuck.els.usb.style.display === '', stuck.els.usb.style.display);
+
+	/*
+	 * Called twice, overlapping. The disconnect listener calls usbClose()
+	 * directly and the read loop calls it again on its way out. With an
+	 * await in the middle the two can overlap, and the port must not be
+	 * closed twice - `port` is captured and nulled before the await, so the
+	 * second caller finds nothing to close.
+	 */
+	const twice = run(usbFile, { serial: true });
+	await twice.sandbox.usbConnect();
+	await settle();
+	await Promise.all([twice.sandbox.usbClose(), twice.sandbox.usbClose()]);
+	await settle();
+
+	check('two overlapping closes close the port once',
+	      twice.serial.port.closes === 1, `closes=${twice.serial.port.closes}`);
+	check('two overlapping closes release the lock once',
+	      twice.serial.port.releases === 1, `releases=${twice.serial.port.releases}`);
+	check('and the screen still says disconnected',
+	      /desconectado/.test(shown(twice)), shown(twice));
 })().then(() => {
 	console.log(failures ? `\nFAILED (${failures})` : '\nall page checks passed');
 	process.exit(failures ? 1 : 0);
