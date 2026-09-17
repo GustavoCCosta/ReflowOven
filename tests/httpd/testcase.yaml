@@ -1,0 +1,17 @@
+tests:
+  # RFO-G42. The first suite that exercises src/net/httpd.c itself; everything
+  # before it tested the files around the server, not the server.
+  #
+  # The scenarios are dominated by sleeping: the fake socket blocks for a slice
+  # before answering EAGAIN, exactly as a real one carrying SO_SNDTIMEO does,
+  # and the trickling peer takes one slice per byte on purpose.
+  reflow.httpd:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - net
+      - httpd
+      - funcional
+    timeout: 120
