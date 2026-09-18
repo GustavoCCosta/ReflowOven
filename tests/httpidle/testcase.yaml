@@ -1,0 +1,20 @@
+tests:
+  # RFO-G44. The RFO-B08 scenario: connections that open and never speak.
+  #
+  # Over the real loopback, unlike tests/httpd/, and the difference is the
+  # nature of the two defects rather than taste: this one is a count of
+  # connections, which loopback reproduces exactly; RFO-B07 is about when the
+  # peer stops reading, which is the kernel's TCP window and needs a fake.
+  #
+  # The suite is dominated by waiting, and the wait IS the mechanism: the slots
+  # come back only after CONFIG_REFLOW_NET_IDLE_BUDGET_MS.
+  reflow.httpidle:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - net
+      - httpd
+      - funcional
+    timeout: 180

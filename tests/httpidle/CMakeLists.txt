@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20.0)
+
+# Same reason as tests/boot, tests/controller and tests/coldstart: reuse the
+# application Kconfig so the test runs against the port, the client limit and
+# the budgets the firmware ships with, instead of a restatement that can drift.
+set(KCONFIG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../Kconfig)
+
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(reflow_httpidle_tests LANGUAGES C)
+
+set(SRC  ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+set(CORE ${SRC}/core)
+set(FAKE ${CMAKE_CURRENT_SOURCE_DIR}/../controller/src)
+
+# httpd.c exactly as it is flashed, with two substitutions at link time:
+#
+#   - net_wait_fake.c takes the place of ${SRC}/net/l4.c. l4.c is the file that
+#     talks to the network stack's event callbacks, and on a simulated platform
+#     no link ever comes up, so every wait would be a real timeout.
+#   - temp_fake.c takes the place of ${CORE}/temp.c, shared with tests/controller
+#     rather than copied. httpd.c needs the telemetry channel and
+#     reflow_cmd_post(), which live in controller.c, and controller.c needs a
+#     thermocouple that a simulated SPI bus does not have.
+#
+# The link module (wifi.c / usb_net.c) is NOT in the image: the wait under test
+# is link-agnostic by design, which is the property l4.c exists to provide.
+target_sources(app PRIVATE
+  src/main.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../httpwait/src/net_wait_fake.c
+  ${FAKE}/temp_fake.c
+  ${SRC}/net/httpd.c
+  ${SRC}/net/cmdparse.c
+  ${SRC}/net/httpgate.c
+  ${SRC}/net/profiles_json.c
+  ${SRC}/net/sendbudget.c
+  ${SRC}/telemetry_json.c
+  ${CORE}/controller.c
+  ${CORE}/heater.c
+  ${CORE}/pid.c
+  ${CORE}/profile.c
+  ${CORE}/tempguard.c
+)
+
+#
+# Zero failures: the link is up the first time the httpd thread asks for it.
+# This suite is about the connection pool, and a server still waiting for the
+# network would be one more thing happening while the scenarios run.
+# tests/httpwait is where the wait itself is measured, with a non-zero value
+# here. It has to be a build-time value either way, because the thread waits
+# from K_THREAD_DEFINE before any test body could set anything (the lesson of
+# RFO-G17, recorded in tests/coldstart).
+target_compile_definitions(app PRIVATE REFLOW_NET_WAIT_FAKE_FAILURES=0)
+
+# Same generated page as the firmware, from the same rule (RFO-B25): this
+# image links httpd.c, so it needs index_html.h too, and a second copy of
+# the recipe here is a second thing to drift.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/index_html.cmake)
+reflow_generate_index_html(${CMAKE_CURRENT_SOURCE_DIR}/../..)
+
+target_include_directories(app PRIVATE ${SRC} ${CORE} ${SRC}/net ${FAKE}
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/../httpwait/src)
