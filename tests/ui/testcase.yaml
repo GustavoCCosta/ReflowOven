@@ -1,0 +1,30 @@
+tests:
+  # Panel ready: the healthy path. The observer has to stay enabled and the
+  # thread draining - this is where a fix that disabled the observer too early,
+  # or unconditionally, would show up.
+  reflow.ui:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - ui
+      - performance
+    timeout: 120
+
+  # Panel unavailable: the RFO-B12 defect. The chosen device's readiness is
+  # denied in a POST_KERNEL SYS_INIT, before any thread runs, because the display
+  # thread reads device_is_ready() once and 500 ms after boot - denying it later
+  # does not make it reconsider, which is why the two properties do not fit in
+  # one image.
+  reflow.ui.no_panel:
+    platform_allow:
+      - native_sim
+      - qemu_x86
+    tags:
+      - reflow
+      - ui
+      - performance
+    extra_configs:
+      - CONFIG_REFLOW_TEST_DENY_PANEL=y
+    timeout: 120

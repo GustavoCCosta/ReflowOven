@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# This suite's Kconfig: one symbol of its own, plus the whole application one.
+#
+# The symbol exists because the two properties of RFO-B12 do not fit in a single
+# image. The display thread reads device_is_ready() ONCE, 500 ms after boot;
+# denying readiness after that does not make it reconsider, and denying it
+# earlier makes the healthy path unmeasurable. So the difference between the two
+# scenes has to exist at boot, and it comes from here.
+config REFLOW_TEST_DENY_PANEL
+	bool "Deny the chosen display's readiness before any thread runs"
+	help
+	  A POST_KERNEL SYS_INIT clears the chosen device's readiness so that the
+	  display thread finds the panel unavailable - the RFO-B12 scenario.
+	  Without it the suite measures the healthy path.
+
+# The application Kconfig, whole: it brings the CONFIG_REFLOW_* menu and ends in
+# `source "Kconfig.zephyr"`, so the tree is sourced exactly once. Sourcing
+# `Kconfig.zephyr` directly here would lose every application symbol.
+source "$(APPLICATION_SOURCE_DIR)/../../Kconfig"

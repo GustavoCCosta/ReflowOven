@@ -182,6 +182,30 @@ static void display_thread(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 
 	if (!device_is_ready(display_dev)) {
+		/*
+		 * RFO-B12. Detaching from the channel before giving up, and the
+		 * reason is the control loop rather than this module.
+		 *
+		 * ZBUS_SUBSCRIBER_DEFINE and ZBUS_CHAN_ADD_OBS attach this
+		 * observer at COMPILE time, so returning from the thread leaves
+		 * it enabled with a queue of four and nobody calling
+		 * zbus_sub_wait(). From the fifth publish on the queue is full,
+		 * and controller.c's zbus_chan_pub(..., K_MSEC(20)) pays the
+		 * whole timeout - every 500 ms and on every state or fault
+		 * transition. With a 100 ms control period that is 20 % of
+		 * overrun, arriving exactly when the panel hardware has failed.
+		 *
+		 * Only in this branch: with a working panel the observer has to
+		 * stay enabled or the UI stops receiving telemetry, and
+		 * tests/ui/ asserts both halves.
+		 *
+		 * Irreversible until the next reset, and that is accepted rather
+		 * than overlooked: device_is_ready() is consulted once, 500 ms
+		 * after boot, so a panel that appears later would not be picked
+		 * up even with the observer enabled. Making this module notice a
+		 * panel arriving late is a different feature, not a smaller one.
+		 */
+		(void)zbus_obs_set_enable(&reflow_display_sub, false);
 		LOG_ERR("display not ready, UI disabled");
 		return;
 	}
