@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
+#include <string.h>
+
 #include "profile.h"
 #include "tempguard.h"
 
@@ -58,6 +60,84 @@ static const struct reflow_profile builtin[] = {
 		.grace_ms = 120000,
 	},
 };
+
+/*
+ * True when the buffer holds a C string: there is a NUL somewhere in it, and
+ * it is not the first byte. Empty names are rejected for the same reason the
+ * unterminated ones are - every reader prints the name to tell the operator
+ * which curve is running, and a blank line answers nothing.
+ */
+static bool name_is_string(const char *name, size_t cap)
+{
+	return name[0] != '\0' && memchr(name, '\0', cap) != NULL;
+}
+
+enum reflow_profile_valid reflow_profile_validate(const struct reflow_profile *prof,
+						  int32_t abs_max_mc)
+{
+	int32_t hottest;
+	uint8_t i;
+
+	if (prof == NULL) {
+		return REFLOW_PROFILE_ERR_NULL;
+	}
+	if (!name_is_string(prof->name, sizeof(prof->name))) {
+		return REFLOW_PROFILE_ERR_NAME;
+	}
+	if (prof->n_stages == 0U || prof->n_stages > REFLOW_MAX_STAGES) {
+		return REFLOW_PROFILE_ERR_STAGES;
+	}
+	if (prof->tol_mc <= 0) {
+		return REFLOW_PROFILE_ERR_TOL;
+	}
+
+	/*
+	 * The hottest point the profile ASKS for, which is what the abort
+	 * level has to sit above. Taken across every stage and not just the
+	 * peak one: a profile is free to put its maximum anywhere, and reading
+	 * only the stage called "peak" would be trusting a name.
+	 */
+	hottest = prof->stages[0].target_mc;
+
+	for (i = 0U; i < prof->n_stages; i++) {
+		const struct reflow_stage *st = &prof->stages[i];
+
+		if (!name_is_string(st->name, sizeof(st->name))) {
+			return REFLOW_PROFILE_ERR_STAGE_NAME;
+		}
+		if (st->nominal_ms == 0U) {
+			return REFLOW_PROFILE_ERR_STAGE_TIME;
+		}
+		if (st->target_mc > hottest) {
+			hottest = st->target_mc;
+		}
+	}
+
+	if (prof->abort_mc <= hottest) {
+		return REFLOW_PROFILE_ERR_ABORT_LOW;
+	}
+	if (prof->abort_mc > abs_max_mc) {
+		return REFLOW_PROFILE_ERR_ABORT_HIGH;
+	}
+
+	return REFLOW_PROFILE_OK;
+}
+
+const char *reflow_profile_valid_str(enum reflow_profile_valid v)
+{
+	switch (v) {
+	case REFLOW_PROFILE_OK:              return "ok";
+	case REFLOW_PROFILE_ERR_NULL:        return "no profile";
+	case REFLOW_PROFILE_ERR_NAME:        return "bad name";
+	case REFLOW_PROFILE_ERR_STAGES:      return "bad stage count";
+	case REFLOW_PROFILE_ERR_STAGE_NAME:  return "bad stage name";
+	case REFLOW_PROFILE_ERR_STAGE_TIME:  return "stage with no time";
+	case REFLOW_PROFILE_ERR_TOL:         return "tolerance not positive";
+	case REFLOW_PROFILE_ERR_ABORT_LOW:   return "abort below the profile peak";
+	case REFLOW_PROFILE_ERR_ABORT_HIGH:  return "abort above the firmware limit";
+	default:                             return "?";
+	}
+}
 
 uint8_t reflow_profile_count(void)
 {

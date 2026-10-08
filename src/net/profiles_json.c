@@ -141,7 +141,15 @@ size_t reflow_profiles_json(char *buf, size_t cap,
 			truncated = true;
 			break;
 		}
-		if (!put_json_string(&o, p->name != NULL ? p->name : "", reserve)) {
+		/*
+		 * No NULL check on the name any more: RFO-F01 made it a fixed
+		 * array, so there is no pointer that could be one. What a
+		 * caller CAN still hand over is an unterminated buffer, and
+		 * that is reflow_profile_validate()'s job, not this file's -
+		 * doing it again here would be a second opinion that can
+		 * disagree with the first.
+		 */
+		if (!put_json_string(&o, p->name, reserve)) {
 			/*
 			 * Roll back to before this entry. Half a name is not a
 			 * shorter list, it is malformed JSON.

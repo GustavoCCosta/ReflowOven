@@ -17,6 +17,46 @@
 #define REFLOW_MAX_STAGES 8
 
 /*
+ * Name buffer sizes. Fixed arrays, not pointers, and that is the whole point
+ * of this header change: a struct with a pointer in it cannot be written to
+ * flash. Persisting it as it was would store an ADDRESS, and the worst case is
+ * not losing the name - it is serving a profile name read from arbitrary
+ * memory on the web page after a reboot or a firmware update.
+ *
+ * Declared here rather than in Kconfig on purpose: profile.c is one of the
+ * files that must build with no Zephyr at all (tests/logic/CMakeLists.txt and
+ * tools/host_sim.c compile it as plain C99), so it never sees autoconf.h.
+ * Same reason the absolute limit reaches reflow_profile_validate() as an
+ * argument instead of as CONFIG_REFLOW_ABS_MAX_TEMP_C.
+ *
+ * The numbers come from the narrowest place a name is shown, which is the
+ * 320x240 panel, measured rather than guessed: LVGL's Montserrat 14 (the
+ * default font) has 158 glyphs with a mean advance of 10.06 px and a widest
+ * advance of 17.5 px (parsed from the adv_w table in
+ * lv_font_montserrat_14.c, which stores 1/16 px units).
+ *
+ *   - Profile name, 32: 31 visible characters at the mean advance is 312 px,
+ *     so a typical name fills the 320 px line and nothing shorter wastes it.
+ *     The longest built-in is "SAC305 lead-free" at 16, which leaves room for
+ *     the editable names this slice exists to make possible.
+ *   - Stage name, 12: the stage shares its line with the stage counter and the
+ *     elapsed time, so it gets roughly a third of the width; 11 visible
+ *     characters is 111 px at the mean advance. The longest built-in is
+ *     "preheat" at 7.
+ *
+ * What does NOT bind these: the telemetry JSON. Its worst case with the sizes
+ * above is 254 bytes against REFLOW_JSON_BUF_SZ of 384, and telemetry_json.h
+ * carries a BUILD_ASSERT so that stays true if somebody grows a name.
+ *
+ * A name made entirely of the widest glyph still overflows the label - 18
+ * characters is already 315 px. That is a display concern, not a data one:
+ * lbl_profile has no long mode set today, so it clips rather than wraps. Left
+ * alone deliberately; see the PR.
+ */
+#define REFLOW_PROFILE_NAME_LEN 32
+#define REFLOW_STAGE_NAME_LEN   12
+
+/*
  * How long a COOLING stage may overrun its nominal time before the run is
  * called a timeout. Deliberately separate from grace_ms, and two orders of
  * magnitude larger (RFO-B04).
@@ -50,14 +90,14 @@ enum reflow_stage_kind {
 };
 
 struct reflow_stage {
-	const char *name;
+	char name[REFLOW_STAGE_NAME_LEN];
 	int32_t target_mc;
 	uint32_t nominal_ms;
 	enum reflow_stage_kind kind;
 };
 
 struct reflow_profile {
-	const char *name;
+	char name[REFLOW_PROFILE_NAME_LEN];
 	uint8_t n_stages;
 	struct reflow_stage stages[REFLOW_MAX_STAGES];
 	/* Hard limit: crossing it aborts the run, whatever the stage. */
@@ -126,6 +166,63 @@ uint32_t reflow_profile_nominal_ms(const struct reflow_profile *prof);
  * and the wrong thing to replace with a literal.
  */
 uint32_t reflow_profile_max_ms(const struct reflow_profile *prof);
+
+/*
+ * Why a profile has to be checked at all, now that it can come from somewhere
+ * other than the table below: every field here is read by the state machine
+ * that decides whether the element is energised. A profile is not data, it is
+ * a set of limits.
+ */
+enum reflow_profile_valid {
+	REFLOW_PROFILE_OK = 0,
+	/* No profile at all. */
+	REFLOW_PROFILE_ERR_NULL,
+	/*
+	 * The name fills its buffer with no NUL in it. Every reader treats it
+	 * as a C string - LOG_INF("%s"), snprintk, lv_label_set_text - so an
+	 * unterminated name is a read past the struct, which is exactly the
+	 * failure this slice exists to make impossible.
+	 */
+	REFLOW_PROFILE_ERR_NAME,
+	/* Zero stages, or more than the array holds. */
+	REFLOW_PROFILE_ERR_STAGES,
+	/* Same NUL rule as the profile name, for one of the stages. */
+	REFLOW_PROFILE_ERR_STAGE_NAME,
+	/*
+	 * A stage of zero nominal time. The runner would hand it a deadline
+	 * already past, so the stage can only end as a timeout.
+	 */
+	REFLOW_PROFILE_ERR_STAGE_TIME,
+	/*
+	 * Tolerance at or below zero: nothing ever counts as having reached
+	 * target, because the comparison is against an exact value.
+	 */
+	REFLOW_PROFILE_ERR_TOL,
+	/*
+	 * The abort level is at or below the hottest the profile asks for. The
+	 * profile would abort itself by following its own plan.
+	 */
+	REFLOW_PROFILE_ERR_ABORT_LOW,
+	/*
+	 * The abort level is above the firmware's absolute cut-out. A profile
+	 * cannot raise the hard limit by asking; it would be an abort level
+	 * the oven can never reach, and a silently disabled barrier.
+	 */
+	REFLOW_PROFILE_ERR_ABORT_HIGH,
+};
+
+/*
+ * Check a profile against its own coherence and against the firmware limit.
+ *
+ * abs_max_mc is CONFIG_REFLOW_ABS_MAX_TEMP_C in milli-degrees, passed in
+ * because this file has no Zephyr. Pass INT32_MAX to check coherence only;
+ * callers that can energise the element must not.
+ */
+enum reflow_profile_valid reflow_profile_validate(const struct reflow_profile *prof,
+						  int32_t abs_max_mc);
+
+/* Human-readable form of the above, for logs and shell output. */
+const char *reflow_profile_valid_str(enum reflow_profile_valid v);
 
 /* Built-in profile table. */
 uint8_t reflow_profile_count(void);
