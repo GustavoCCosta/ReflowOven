@@ -151,4 +151,135 @@ ZTEST(reflow_httpd, test_a_fast_client_gets_everything)
 		      reflow_fake_accepted(fd), BODY_LEN);
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * RFO-B30. The length build_state_json() reports.
+ *
+ * snprintk() returns the length of the string it was ASKED to produce, not of
+ * the one it produced. Both callers hand that number straight to send_all()
+ * as a byte count, so on truncation the server reads past a 384 byte array on
+ * its own thread stack and sends what follows it to the client. Not a
+ * corrupted page: a stack leak over the network, on the interface anything in
+ * cable or radio range can reach.
+ *
+ * Reached here by shrinking the buffer rather than by lengthening a name. The
+ * issue describes the defect becoming reachable when some stage, profile or
+ * fault name grows past the slack in REFLOW_JSON_BUF_SZ, and that is true -
+ * but it is the same arithmetic from the other side, and it is the arithmetic
+ * that is wrong. A test that needed a longer name would also need the
+ * built-in table changed to produce one, which measures the table instead of
+ * the clamp.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * A buffer with a known pattern on both sides of the part the code may touch.
+ * If the clamp is missing the assertions below fail on the returned length
+ * alone, but the canary is what distinguishes "reported too much" from
+ * "wrote too much", and only one of those two is a memory bug.
+ */
+#define CANARY 0x5a
+#define PAD    32
+
+struct guarded {
+	unsigned char before[PAD];
+	char body[JSON_BUF_SZ];
+	unsigned char after[PAD];
+};
+
+static void guarded_init(struct guarded *g)
+{
+	memset(g, CANARY, sizeof(*g));
+}
+
+static void guarded_check(const struct guarded *g, size_t cap)
+{
+	size_t i;
+
+	for (i = 0; i < PAD; i++) {
+		zassert_equal(g->before[i], CANARY,
+			      "wrote %zu bytes BEFORE the buffer", PAD - i);
+		zassert_equal(g->after[i], CANARY,
+			      "wrote past the end of the buffer at +%zu", i);
+	}
+	for (i = cap; i < sizeof(g->body); i++) {
+		zassert_equal((unsigned char)g->body[i], CANARY,
+			      "wrote past the cap it was given, at +%zu", i - cap);
+	}
+}
+
+/*
+ * THE assertion of this ticket, and it is about the RETURN VALUE, because the
+ * return value is what becomes a byte count.
+ *
+ * Every cap from one byte to comfortably more than the object needs. One of
+ * them is the boundary where the text stops fitting, and an off-by-one in the
+ * clamp shows up here instead of on a board.
+ */
+ZTEST(reflow_httpd, test_the_reported_length_is_never_more_than_was_written)
+{
+	size_t cap;
+
+	for (cap = 1; cap <= JSON_BUF_SZ; cap++) {
+		struct guarded g;
+		int n;
+
+		guarded_init(&g);
+		n = build_state_json(g.body, cap);
+
+		zassert_true(n >= 0, "cap %zu: negative length %d", cap, n);
+		zassert_true((size_t)n < cap,
+			     "cap %zu: reported %d bytes, which is what snprintk "
+			     "WOULD have written - send_all() takes this as a "
+			     "byte count and reads %zu bytes past a buffer on "
+			     "the server's own stack, out to the client "
+			     "(RFO-B30)",
+			     cap, n, (size_t)n - cap + 1U);
+		zassert_equal((size_t)n, strlen(g.body),
+			      "cap %zu: reported %d but the string is %zu long",
+			      cap, n, strlen(g.body));
+		guarded_check(&g, cap);
+	}
+}
+
+/*
+ * The other half, so the clamp cannot be satisfied by always returning zero:
+ * at a comfortable size the answer is the whole object, not a truncation.
+ */
+ZTEST(reflow_httpd, test_a_comfortable_buffer_gets_the_whole_object)
+{
+	struct guarded g;
+	int n;
+
+	guarded_init(&g);
+	n = build_state_json(g.body, sizeof(g.body));
+
+	zassert_true(n > 0, "nothing was written into a full-size buffer");
+	zassert_equal((size_t)n, strlen(g.body), "length disagrees with the string");
+	zassert_equal(g.body[0], '{', "not a JSON object: %s", g.body);
+	zassert_equal(g.body[n - 1], '}', "the object is not closed: %s", g.body);
+	zassert_not_null(strstr(g.body, "temp_mc"), "no telemetry in it: %s", g.body);
+	guarded_check(&g, sizeof(g.body));
+}
+
+/*
+ * A truncated object is still terminated. The clamp exists so the LENGTH is
+ * honest; this is the companion property the length is useless without,
+ * because send_response() and the %s in push_event() both read the buffer as
+ * a C string.
+ */
+ZTEST(reflow_httpd, test_a_truncated_object_is_still_a_string)
+{
+	struct guarded g;
+	int n;
+
+	guarded_init(&g);
+	n = build_state_json(g.body, 16);
+
+	zassert_true((size_t)n < 16U, "reported %d for a 16 byte buffer", n);
+	zassert_equal(g.body[n], '\0',
+		      "the buffer is not terminated at the length returned");
+	guarded_check(&g, 16);
+}
+
 ZTEST_SUITE(reflow_httpd, NULL, suite_setup, scenario_reset, NULL, NULL);
