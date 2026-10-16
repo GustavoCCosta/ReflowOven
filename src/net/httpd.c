@@ -248,15 +248,48 @@ static void telemetry_cb(const struct zbus_channel *chan)
 ZBUS_LISTENER_DEFINE(reflow_httpd_lsnr, telemetry_cb);
 ZBUS_CHAN_ADD_OBS(reflow_telemetry_chan, reflow_httpd_lsnr, 4);
 
+/*
+ * RFO-B30. Returns the number of bytes that are ACTUALLY in buf, never the
+ * number snprintk() would have liked to write.
+ *
+ * That difference is the whole defect. snprintk() reports the length of the
+ * string it was asked to produce, not of the one it produced, so on
+ * truncation the caller got a number larger than the buffer - and both
+ * callers hand it straight to send_all() as a byte count. The server then
+ * reads past a 384 byte array on its own thread stack and sends whatever
+ * follows it to the client: not a corrupted page, a stack leak over the
+ * network, on the one interface that anything in cable or radio range can
+ * reach.
+ *
+ * Clamped here rather than at the two call sites on purpose. A clamp at the
+ * call site is correct until somebody adds a third caller, and the cost of
+ * forgetting is not a visibly wrong page - it is a leak nobody sees. One
+ * chokepoint, same reason telemetry_json.c is the single formatter.
+ */
 static int build_state_json(char *buf, size_t len)
 {
 	struct reflow_telemetry t;
+	int n;
 
 	k_mutex_lock(&snap_lock, K_FOREVER);
 	t = snapshot;
 	k_mutex_unlock(&snap_lock);
 
-	return reflow_telemetry_json(&t, buf, len);
+	n = reflow_telemetry_json(&t, buf, len);
+	if (n < 0) {
+		/*
+		 * An encoding error. snprintk() leaves the buffer in an
+		 * unspecified state, so the only honest length is zero, and
+		 * the buffer has to be made into the empty string to match it.
+		 */
+		buf[0] = '\0';
+		return 0;
+	}
+	if ((size_t)n >= len) {
+		n = (int)len - 1;
+	}
+
+	return n;
 }
 
 /*
@@ -384,9 +417,31 @@ static int push_event(int fd)
 {
 	char json[JSON_BUF_SZ];
 	char frame[JSON_BUF_SZ + 16];
-	int n = build_state_json(json, sizeof(json));
+	int n;
+
+	/*
+	 * The length is deliberately discarded: json is a C string from here
+	 * on and the %s below measures it. Taking build_state_json()'s return
+	 * and then overwriting it, as this read before RFO-B30, made the
+	 * discard look like a bug and hid the one that was real.
+	 */
+	(void)build_state_json(json, sizeof(json));
 
 	n = snprintk(frame, sizeof(frame), "data: %s\n\n", json);
+	if (n < 0) {
+		return -1;
+	}
+	if ((size_t)n >= sizeof(frame)) {
+		/*
+		 * Same clamp as build_state_json(), for the same reason, on
+		 * the second buffer. It cannot trigger while frame is
+		 * JSON_BUF_SZ + 16 and the wrapper costs 8 - but that is an
+		 * argument about today's arithmetic, and the defect this
+		 * guards against is somebody changing one of the two numbers.
+		 */
+		n = (int)sizeof(frame) - 1;
+	}
+
 	return send_all(fd, frame, (size_t)n);
 }
 
