@@ -12,6 +12,9 @@ on:
   push:
     branches: [main]
 
+env:
+  ZEPHYR_REV: 7d26c529db88f9fc35a18cd24f26b3237e2c13ab
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -107,6 +110,7 @@ jobs:
         # RFO-G14.
         run: |
           west init ws
+          git -C ws/zephyr checkout --quiet "$ZEPHYR_REV"
           mv app ws/app
 
       - name: Atualizar workspace
@@ -166,6 +170,7 @@ jobs:
         # Mesmo conserto do job ztest (RFO-G14).
         run: |
           west init ws
+          git -C ws/zephyr checkout --quiet "$ZEPHYR_REV"
           mv app ws/app
       - name: Atualizar workspace
         working-directory: ws
@@ -246,6 +251,7 @@ jobs:
         # Mesmo conserto do job ztest (RFO-G14).
         run: |
           west init ws
+          git -C ws/zephyr checkout --quiet "$ZEPHYR_REV"
           mv app ws/app
 
       - name: Atualizar workspace
