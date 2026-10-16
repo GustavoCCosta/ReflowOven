@@ -6,6 +6,7 @@
  * Run with:  west twister -T tests -p native_sim
  */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1726,7 +1727,47 @@ static void set_profiles(uint8_t n, const char *const *names)
 {
 	zassert_true(n <= ARRAY_SIZE(fake_profiles), "test wants too many profiles");
 	for (uint8_t i = 0; i < n; i++) {
-		fake_profiles[i].name = names[i];
+		/*
+		 * Copied, not pointed at: RFO-F01 made the name a fixed array.
+		 * The assert is not ceremony - a test name that silently lost
+		 * its tail would make the length arithmetic below measure a
+		 * shorter string than the one it claims to be measuring.
+		 */
+		zassert_true(strlen(names[i]) < REFLOW_PROFILE_NAME_LEN,
+			     "test profile name '%s' does not fit %d bytes",
+			     names[i], REFLOW_PROFILE_NAME_LEN);
+		strncpy(fake_profiles[i].name, names[i],
+			sizeof(fake_profiles[i].name) - 1U);
+		fake_profiles[i].name[sizeof(fake_profiles[i].name) - 1U] = '\0';
+	}
+	fake_count = n;
+}
+
+/*
+ * n profiles whose names are the LONGEST the type allows, each one distinct.
+ *
+ * Built from REFLOW_PROFILE_NAME_LEN instead of spelled out, and that is the
+ * point: before RFO-F01 these tests used 40-character literals, which a
+ * const char * made possible and a fixed buffer does not. Writing 31 by hand
+ * would be the same trap one size change away, so the worst case the TYPE
+ * permits is computed from the type.
+ *
+ * The scenario is unchanged - eight of these still blow past the 256 bytes
+ * httpd.c hands in - and the claim is sharper than it was: not "a name longer
+ * than anything that can exist overflows the buffer", but "the longest name
+ * that CAN exist does".
+ */
+static void set_longest_profiles(uint8_t n)
+{
+	zassert_true(n <= ARRAY_SIZE(fake_profiles), "test wants too many profiles");
+	for (uint8_t i = 0; i < n; i++) {
+		char *name = fake_profiles[i].name;
+		size_t j;
+
+		for (j = 0; j < REFLOW_PROFILE_NAME_LEN - 1U; j++) {
+			name[j] = (char)('0' + (int)((i + j) % 10U));
+		}
+		name[REFLOW_PROFILE_NAME_LEN - 1U] = '\0';
 	}
 	fake_count = n;
 }
@@ -1764,28 +1805,19 @@ ZTEST(reflow_profiles_json, test_empty_list_is_valid_json)
 }
 
 /*
- * The assertion that goes red without the patch. Eight names of 40 characters
- * blow well past the 256 bytes httpd.c hands in, which is exactly the condition
- * that made the old code compute sizeof(body) - n near SIZE_MAX.
+ * The assertion that goes red without the patch. Eight names at the longest
+ * the type allows blow well past the 256 bytes httpd.c hands in, which is
+ * exactly the condition that made the old code compute sizeof(body) - n near
+ * SIZE_MAX.
  */
 ZTEST(reflow_profiles_json, test_overflow_never_leaves_the_buffer)
 {
-	static const char *const names[] = {
-		"0123456789012345678901234567890123456789",
-		"1123456789012345678901234567890123456789",
-		"2123456789012345678901234567890123456789",
-		"3123456789012345678901234567890123456789",
-		"4123456789012345678901234567890123456789",
-		"5123456789012345678901234567890123456789",
-		"6123456789012345678901234567890123456789",
-		"7123456789012345678901234567890123456789",
-	};
 	const size_t cap = 256;
 	struct guarded g;
 	size_t n;
 
 	guarded_init(&g);
-	set_profiles(8, names);
+	set_longest_profiles(8);
 
 	n = reflow_profiles_json(g.body, cap, fake_lookup, 8);
 
@@ -1797,21 +1829,11 @@ ZTEST(reflow_profiles_json, test_overflow_never_leaves_the_buffer)
 
 ZTEST(reflow_profiles_json, test_truncation_is_explicit_and_still_json)
 {
-	static const char *const names[] = {
-		"0123456789012345678901234567890123456789",
-		"1123456789012345678901234567890123456789",
-		"2123456789012345678901234567890123456789",
-		"3123456789012345678901234567890123456789",
-		"4123456789012345678901234567890123456789",
-		"5123456789012345678901234567890123456789",
-		"6123456789012345678901234567890123456789",
-		"7123456789012345678901234567890123456789",
-	};
 	struct guarded g;
 	size_t n;
 
 	guarded_init(&g);
-	set_profiles(8, names);
+	set_longest_profiles(8);
 
 	n = reflow_profiles_json(g.body, 256, fake_lookup, 8);
 
@@ -1859,19 +1881,14 @@ ZTEST(reflow_profiles_json, test_buffer_too_small_writes_nothing)
 }
 
 /*
- * Every cap from too-small to comfortable, with names that overflow most of
- * them. One of these sizes is the boundary where the tail stops fitting, and a
- * clamp that is off by one shows up here rather than in a browser.
+ * Every cap from too-small to comfortable, with names at the longest the type
+ * allows, which overflow most of them. One of these sizes is the boundary
+ * where the tail stops fitting, and a clamp that is off by one shows up here
+ * rather than in a browser.
  */
 ZTEST(reflow_profiles_json, test_every_buffer_size_is_safe)
 {
-	static const char *const names[] = {
-		"0123456789012345678901234567890123456789",
-		"1123456789012345678901234567890123456789",
-		"2123456789012345678901234567890123456789",
-	};
-
-	set_profiles(3, names);
+	set_longest_profiles(3);
 
 	for (size_t cap = 1; cap <= 200; cap++) {
 		struct guarded g;
@@ -2696,3 +2713,273 @@ ZTEST(reflow_wifipolicy, test_the_ceiling_fits_the_recovery_budget)
 }
 
 ZTEST_SUITE(reflow_wifipolicy, NULL, NULL, NULL, NULL, NULL);
+
+/*
+ * ---------------------------------------------------------------------------
+ * RFO-F01. The profile layout, and the check that goes with it.
+ *
+ * Why these tests exist at all: the struct stopped carrying a pointer so that
+ * it can be written to flash. Persisting it as it was would have stored an
+ * ADDRESS, and the failure that follows is not a lost name - it is a profile
+ * name read from arbitrary memory and served on the web page after a reboot
+ * or a firmware update.
+ *
+ * So the tests below assert the two halves of that: the name really lives
+ * inside the struct, and a profile that arrives incoherent is refused before
+ * anything decides to energise the element.
+ * ---------------------------------------------------------------------------
+ */
+
+/* CONFIG_REFLOW_ABS_MAX_TEMP_C default, in milli-degC. */
+#define ABS_MAX_MC 270000
+
+/* A profile that passes, to mutate one field at a time away from. */
+static struct reflow_profile sane_profile(void)
+{
+	struct reflow_profile p;
+
+	memset(&p, 0, sizeof(p));
+	strcpy(p.name, "sane");
+	p.n_stages = 2;
+	strcpy(p.stages[0].name, "ramp");
+	p.stages[0].target_mc = 150000;
+	p.stages[0].nominal_ms = 90000;
+	p.stages[0].kind = REFLOW_STAGE_RAMP;
+	strcpy(p.stages[1].name, "cool");
+	p.stages[1].target_mc = 50000;
+	p.stages[1].nominal_ms = 180000;
+	p.stages[1].kind = REFLOW_STAGE_COOL;
+	p.abort_mc = 200000;
+	p.tol_mc = 5000;
+	p.grace_ms = 60000;
+
+	return p;
+}
+
+/*
+ * The property the whole slice exists for. Not "the struct has no pointer" -
+ * that is not expressible as a runtime assertion - but its observable
+ * consequence: the characters of the name are INSIDE the struct's own bytes,
+ * so a byte-for-byte copy of the struct is a complete copy of the profile.
+ *
+ * The memcmp against a raw byte offset is deliberate. Comparing p->name with
+ * strcmp would pass just as well if name were still a pointer to a string
+ * literal somewhere else, which is exactly the thing being ruled out.
+ */
+ZTEST(reflow_profile_layout, test_the_name_lives_inside_the_struct)
+{
+	const struct reflow_profile *p = reflow_profile_get(0);
+	unsigned char raw[sizeof(struct reflow_profile)];
+	size_t off = offsetof(struct reflow_profile, name);
+
+	zassert_not_null(p, "no built-in profile 0");
+	memcpy(raw, p, sizeof(raw));
+
+	zassert_equal(memcmp(&raw[off], "SAC305 lead-free", 17), 0,
+		      "the name is not stored in the struct's own bytes, so a "
+		      "copy of the struct is not a copy of the profile - which "
+		      "is what persisting it to flash would do (RFO-F01)");
+}
+
+/*
+ * A name that fills the buffer exactly. The last byte has to be the NUL,
+ * because every reader of this field treats it as a C string - LOG_INF("%s"),
+ * snprintk into the telemetry frame, lv_label_set_text on the panel. One
+ * unterminated name is a read past the struct in all three.
+ */
+ZTEST(reflow_profile_layout, test_a_name_at_the_exact_limit_is_still_terminated)
+{
+	struct reflow_profile p = sane_profile();
+	char longest[REFLOW_PROFILE_NAME_LEN];
+	size_t i;
+
+	for (i = 0; i < sizeof(longest) - 1U; i++) {
+		longest[i] = 'W';
+	}
+	longest[sizeof(longest) - 1U] = '\0';
+
+	strncpy(p.name, longest, sizeof(p.name) - 1U);
+	p.name[sizeof(p.name) - 1U] = '\0';
+
+	zassert_equal(strlen(p.name), REFLOW_PROFILE_NAME_LEN - 1U,
+		      "a name at the limit lost characters: %zu of %d",
+		      strlen(p.name), REFLOW_PROFILE_NAME_LEN - 1);
+	zassert_equal(p.name[REFLOW_PROFILE_NAME_LEN - 1U], '\0',
+		      "the last byte of a full name buffer is not the NUL");
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC), REFLOW_PROFILE_OK,
+		      "a name that exactly fills the buffer was refused");
+}
+
+/*
+ * The counterpart, and the one that matters: a buffer with no NUL anywhere is
+ * refused rather than printed.
+ */
+ZTEST(reflow_profile_layout, test_an_unterminated_name_is_refused)
+{
+	struct reflow_profile p = sane_profile();
+
+	memset(p.name, 'W', sizeof(p.name));
+
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_NAME,
+		      "a name with no NUL in it was accepted; every reader of "
+		      "this field would run off the end of the struct");
+}
+
+ZTEST(reflow_profile_layout, test_an_unterminated_stage_name_is_refused)
+{
+	struct reflow_profile p = sane_profile();
+
+	memset(p.stages[1].name, 'W', sizeof(p.stages[1].name));
+
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_STAGE_NAME,
+		      "an unterminated stage name was accepted - and the stage "
+		      "name is the one that goes into every telemetry frame");
+}
+
+ZTEST(reflow_profile_layout, test_an_empty_name_is_refused)
+{
+	struct reflow_profile p = sane_profile();
+
+	p.name[0] = '\0';
+
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_NAME,
+		      "an empty name was accepted; the name is how the operator "
+		      "is told which curve is running");
+}
+
+/*
+ * THE check the issue moved here from #58: the abort level against both
+ * references it has to agree with.
+ */
+ZTEST(reflow_profile_layout, test_abort_at_or_below_the_profile_peak_is_refused)
+{
+	struct reflow_profile p = sane_profile();
+
+	/* Exactly at the hottest the profile asks for. */
+	p.abort_mc = 150000;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_ABORT_LOW,
+		      "a profile whose abort level equals its own peak was "
+		      "accepted: it aborts itself by following its own plan");
+
+	p.abort_mc = 149999;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_ABORT_LOW,
+		      "abort below the peak was accepted");
+
+	p.abort_mc = 150001;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC), REFLOW_PROFILE_OK,
+		      "one milli-degree above the peak is coherent and was "
+		      "refused");
+}
+
+/*
+ * The peak is taken across every stage, not from the stage that happens to be
+ * called "peak". Reading a name to decide a limit is trusting a label.
+ */
+ZTEST(reflow_profile_layout, test_the_peak_is_the_hottest_stage_not_the_named_one)
+{
+	struct reflow_profile p = sane_profile();
+
+	/* The LAST stage is the hottest here, and it is the one called cool. */
+	p.stages[1].target_mc = 240000;
+	p.abort_mc = 200000;
+
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_ABORT_LOW,
+		      "the hottest stage was not the one consulted: abort "
+		      "200000 sits below a stage asking for 240000");
+}
+
+ZTEST(reflow_profile_layout, test_abort_above_the_firmware_limit_is_refused)
+{
+	struct reflow_profile p = sane_profile();
+
+	p.abort_mc = ABS_MAX_MC + 1;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_ABORT_HIGH,
+		      "a profile was allowed to set its abort level above the "
+		      "firmware's absolute cut-out, which would be a barrier "
+		      "the oven can never reach");
+
+	p.abort_mc = ABS_MAX_MC;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC), REFLOW_PROFILE_OK,
+		      "abort exactly at the firmware limit was refused; it is "
+		      "reachable, so it is coherent");
+}
+
+ZTEST(reflow_profile_layout, test_the_other_incoherences)
+{
+	struct reflow_profile p;
+
+	zassert_equal(reflow_profile_validate(NULL, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_NULL, "NULL was accepted");
+
+	p = sane_profile();
+	p.n_stages = 0;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_STAGES, "a profile with no stages was accepted");
+
+	p = sane_profile();
+	p.n_stages = REFLOW_MAX_STAGES + 1;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_STAGES,
+		      "a stage count past the end of the array was accepted");
+
+	p = sane_profile();
+	p.tol_mc = 0;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_TOL,
+		      "zero tolerance was accepted: nothing would ever count as "
+		      "having reached target");
+
+	p = sane_profile();
+	p.stages[0].nominal_ms = 0;
+	zassert_equal(reflow_profile_validate(&p, ABS_MAX_MC),
+		      REFLOW_PROFILE_ERR_STAGE_TIME,
+		      "a stage with no time was accepted: its deadline is "
+		      "already past, so it can only end as a timeout");
+}
+
+/*
+ * The regression half of the acceptance criteria: the built-ins are the same
+ * curves after the refactor, and every one of them passes the new check. If
+ * the firmware ships a profile its own validator refuses, the validator is
+ * wrong or the profile is - either way it must not be discovered on a board.
+ */
+ZTEST(reflow_profile_layout, test_every_builtin_is_valid_and_unchanged)
+{
+	static const char *const names[] = {
+		"SAC305 lead-free",
+		"Sn63Pb37 leaded",
+		"bake / dry 120C",
+		"Bake / Dry 200C",
+	};
+	uint8_t n = reflow_profile_count();
+	uint8_t i;
+
+	zassert_equal(n, ARRAY_SIZE(names),
+		      "the built-in table changed size: %u profiles, %zu names",
+		      n, ARRAY_SIZE(names));
+
+	for (i = 0; i < n; i++) {
+		const struct reflow_profile *p = reflow_profile_get(i);
+		enum reflow_profile_valid v;
+
+		zassert_not_null(p, "built-in %u is missing", i);
+		zassert_equal(strcmp(p->name, names[i]), 0,
+			      "built-in %u is named '%s', not '%s'",
+			      i, p->name, names[i]);
+
+		v = reflow_profile_validate(p, ABS_MAX_MC);
+		zassert_equal(v, REFLOW_PROFILE_OK,
+			      "the firmware ships profile '%s', which its own "
+			      "validator refuses: %s",
+			      p->name, reflow_profile_valid_str(v));
+	}
+}
+
+ZTEST_SUITE(reflow_profile_layout, NULL, NULL, NULL, NULL, NULL);
